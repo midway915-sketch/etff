@@ -8,9 +8,6 @@ import numpy as np
 import pandas as pd
 
 
-# -------------------------
-# IO helpers
-# -------------------------
 def read_table(parq: str, csv: str) -> pd.DataFrame:
     p = Path(parq)
     c = Path(csv)
@@ -29,7 +26,6 @@ def read_universe(universe_csv: str) -> list[str]:
     path = Path(universe_csv)
     if not path.exists():
         raise FileNotFoundError(f"Missing universe file: {universe_csv}")
-
     uni = pd.read_csv(path)
     if "Ticker" not in uni.columns:
         raise ValueError("universe.csv must contain 'Ticker' column")
@@ -37,9 +33,7 @@ def read_universe(universe_csv: str) -> list[str]:
     if "Enabled" in uni.columns:
         uni = uni[uni["Enabled"] == True]  # noqa: E712
 
-    tickers = (
-        uni["Ticker"].astype(str).str.upper().str.strip().dropna().unique().tolist()
-    )
+    tickers = uni["Ticker"].astype(str).str.upper().str.strip().dropna().unique().tolist()
     return tickers
 
 
@@ -50,9 +44,6 @@ def ensure_cols(df: pd.DataFrame, cols: list[str]) -> None:
 
 
 def require_files(spec: str) -> None:
-    """
-    spec example: "data/features/features_model.parquet,app/model.pkl"
-    """
     if not spec:
         return
     parts = [p.strip() for p in spec.split(",") if p.strip()]
@@ -61,9 +52,6 @@ def require_files(spec: str) -> None:
         raise FileNotFoundError(f"Missing required files: {missing}")
 
 
-# -------------------------
-# scoring
-# -------------------------
 def coerce_num(df: pd.DataFrame, col: str, default: float = 0.0) -> pd.Series:
     if col not in df.columns:
         return pd.Series([default] * len(df), index=df.index, dtype=float)
@@ -71,46 +59,35 @@ def coerce_num(df: pd.DataFrame, col: str, default: float = 0.0) -> pd.Series:
 
 
 def build_utility(df: pd.DataFrame, lambda_tail: float) -> pd.Series:
-    """
-    Utility = ret_score - lambda_tail * p_tail
-    """
     ret_score = coerce_num(df, "ret_score", 0.0)
     p_tail = coerce_num(df, "p_tail", 0.0)
     return (ret_score - float(lambda_tail) * p_tail).astype(float)
 
 
-def pick_topk_per_day(df: pd.DataFrame, rank_by: str, topk: int) -> pd.DataFrame:
-    """
-    df: eligible candidates (Date/Ticker rows)
-    return: up to topk rows per Date, with Rank=1..topk (1 is best)
-    """
+def rank_topk_per_day(df: pd.DataFrame, rank_by: str, topk: int) -> pd.DataFrame:
     if df.empty:
         return df
-
     if rank_by not in ("utility", "ret_score", "p_success"):
         raise ValueError(f"rank_by must be one of utility|ret_score|p_success (got {rank_by})")
 
     df = df.copy()
-
-    # tie-breakers
     df["_rank"] = coerce_num(df, rank_by, 0.0)
     df["_ev"] = coerce_num(df, "EV", 0.0) if "EV" in df.columns else 0.0
     df["_close"] = coerce_num(df, "Close", 0.0) if "Close" in df.columns else 0.0
 
     df = df.sort_values(["Date", "_rank", "_ev", "_close"], ascending=[True, False, False, False])
 
-    # take topk per date
-    out = df.groupby("Date", group_keys=False).head(int(topk)).copy()
-    out["Rank"] = out.groupby("Date").cumcount() + 1
+    # take topk rows per Date
+    out = df.groupby("Date", group_keys=False).head(int(topk)).reset_index(drop=True)
 
-    return out.drop(columns=["_rank", "_ev", "_close"], errors="ignore")
+    # add RankIdx per date (1..K)
+    out["RankIdx"] = out.groupby("Date").cumcount() + 1
+    out = out.drop(columns=["_rank", "_ev", "_close"])
+    return out
 
 
-# -------------------------
-# main
-# -------------------------
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Predict gate picks (Top-K per day) with universe-only candidates.")
+    ap = argparse.ArgumentParser(description="Predict gate picks (TopK per day) with universe-only candidates.")
     ap.add_argument("--profit-target", required=True, type=float)
     ap.add_argument("--max-days", required=True, type=int)
     ap.add_argument("--stop-level", required=True, type=float)
@@ -132,26 +109,23 @@ def main() -> None:
     ap.add_argument("--rank-by", required=True, choices=["utility", "ret_score", "p_success"])
     ap.add_argument("--lambda-tail", required=True, type=float)
 
-    ap.add_argument("--topk", default=1, type=int, help="Top-K picks per day (1 or 2 recommended)")
+    ap.add_argument("--topk", default=1, type=int, help="Top K picks per day (1 or 2 recommended)")
+    ap.add_argument("--ps-min", default=0.0, type=float, help="Minimum p_success to be eligible (0.0 disables)")
 
     ap.add_argument("--require-files", default="", type=str, help="comma-separated file paths that must exist")
-
     args = ap.parse_args()
 
-    if args.require_files:
-        require_files(args.require_files)
+    require_files(args.require_files)
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # ---------- load features
     feats = read_table(args.features_parq, args.features_csv).copy()
     ensure_cols(feats, ["Date", "Ticker"])
     feats["Date"] = norm_date(feats["Date"])
     feats["Ticker"] = feats["Ticker"].astype(str).str.upper().str.strip()
     feats = feats.dropna(subset=["Date", "Ticker"]).sort_values(["Date", "Ticker"]).reset_index(drop=True)
 
-    # ---------- universe-only filter (prevents SPY/^VIX from leaking into picks)
     universe = set(read_universe(args.universe_csv))
     excludes = set([t.strip().upper() for t in args.exclude_tickers.split(",") if t.strip()])
 
@@ -162,45 +136,46 @@ def main() -> None:
 
     if after == 0:
         raise RuntimeError(
-            f"No rows left after universe filter. before={before} after={after}. "
-            f"Check universe.csv and features_model tickers."
+            f"No rows left after universe filter. before={before} after={after} "
+            f"(excluded={sorted(list(excludes))})"
         )
 
-    # ---------- compute utility + sanitize numeric columns
     feats["p_tail"] = coerce_num(feats, "p_tail", 0.0)
     feats["p_success"] = coerce_num(feats, "p_success", 0.0)
     feats["ret_score"] = coerce_num(feats, "ret_score", 0.0)
     feats["utility"] = build_utility(feats, lambda_tail=float(args.lambda_tail))
 
-    # ---------- gate conditions
+    # base eligibility: p_success min (optional)
+    ps_ok = feats["p_success"] >= float(args.ps_min)
+
+    # tail gate
     tail_ok = feats["p_tail"] <= float(args.tail_threshold)
 
+    # utility gate (per-date quantile)
     q = float(args.utility_quantile)
     if not (0.0 <= q <= 1.0):
         raise ValueError("--utility-quantile must be in [0,1]")
-
     util_cut = feats.groupby("Date")["utility"].transform(lambda s: float(s.quantile(q)) if len(s) else np.nan)
     util_ok = (feats["utility"] >= util_cut).fillna(False)
 
     if args.mode == "none":
-        eligible = feats
+        eligible = feats[ps_ok].copy()
     elif args.mode == "tail":
-        eligible = feats[tail_ok].copy()
+        eligible = feats[ps_ok & tail_ok].copy()
     elif args.mode == "utility":
-        eligible = feats[util_ok].copy()
+        eligible = feats[ps_ok & util_ok].copy()
     elif args.mode == "tail_utility":
-        eligible = feats[tail_ok & util_ok].copy()
+        eligible = feats[ps_ok & tail_ok & util_ok].copy()
     else:
         raise ValueError(f"Unknown mode: {args.mode}")
 
-    # Top-K per day
     topk = int(args.topk)
-    if topk <= 0:
-        raise ValueError("--topk must be >= 1")
-    picks = pick_topk_per_day(eligible, rank_by=args.rank_by, topk=topk)
+    if topk < 1 or topk > 5:
+        raise ValueError("--topk should be 1~5 (recommend 1 or 2)")
 
-    # ---------- output
-    out_cols = ["Date", "Ticker", "Rank", "p_tail", "p_success", "ret_score", "utility"]
+    picks = rank_topk_per_day(eligible, rank_by=args.rank_by, topk=topk)
+
+    out_cols = ["Date", "Ticker", "RankIdx", "p_tail", "p_success", "ret_score", "utility"]
     extra_cols = [c for c in ["EV", "Close", "Volume"] if c in picks.columns]
     keep = [c for c in out_cols + extra_cols if c in picks.columns]
     picks_out = picks[keep].copy()
@@ -216,9 +191,8 @@ def main() -> None:
         "tail_threshold": float(args.tail_threshold),
         "utility_quantile": float(args.utility_quantile),
         "lambda_tail": float(args.lambda_tail),
+        "ps_min": float(args.ps_min),
         "topk": int(args.topk),
-        "universe_csv": args.universe_csv,
-        "universe_size": int(len(universe)),
         "excluded": sorted(list(excludes)),
         "rows_features_after_filter": int(len(feats)),
         "rows_eligible": int(len(eligible)),
@@ -234,15 +208,17 @@ def main() -> None:
     meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
 
     print("=" * 60)
-    print(f"[DONE] wrote picks: {picks_path} rows={len(picks_out)} days={meta['picks_days']} topk={topk}")
+    print(f"[DONE] wrote picks: {picks_path} rows={len(picks_out)} days={meta['picks_days']}")
     print(f"[DONE] wrote meta : {meta_path}")
+    print(f"[INFO] mode={args.mode} tail_max={args.tail_threshold} u_q={args.utility_quantile} rank_by={args.rank_by} ps_min={args.ps_min} topk={args.topk}")
     print(f"[INFO] universe_only rows: {before} -> {after} (excluded {sorted(list(excludes))})")
-    if picks_out.empty:
-        print("[WARN] picks_out is empty. Gate may be too strict.")
-    else:
+
+    if not picks_out.empty:
         bad = set(picks_out["Ticker"].astype(str).str.upper().unique().tolist()) & excludes
         if bad:
             raise RuntimeError(f"[BUG] excluded tickers still present in picks: {sorted(list(bad))}")
+    else:
+        print("[WARN] picks_out is empty. Gate may be too strict.")
     print("=" * 60)
 
 

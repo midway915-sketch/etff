@@ -2,186 +2,342 @@
 from __future__ import annotations
 
 import argparse
-import glob
 from pathlib import Path
+import re
+import math
 import pandas as pd
 import numpy as np
 
 
-def _read_csv_safe(p: str) -> pd.DataFrame | None:
-    try:
-        df = pd.read_csv(p)
-        if not isinstance(df, pd.DataFrame) or df.empty:
-            return None
-        return df
-    except Exception as e:
-        print(f"[WARN] failed to read {p}: {e}")
-        return None
+def _read_csv(path: Path) -> pd.DataFrame:
+    return pd.read_csv(path)
 
 
-def _safe_float(x, default=np.nan) -> float:
-    try:
-        v = pd.to_numeric(pd.Series([x]), errors="coerce").iloc[0]
-        return float(v) if np.isfinite(v) else float(default)
-    except Exception:
-        return float(default)
+def _read_prices(prices_parq: Path, prices_csv: Path) -> pd.DataFrame:
+    if prices_parq.exists():
+        df = pd.read_parquet(prices_parq)
+    elif prices_csv.exists():
+        df = pd.read_csv(prices_csv)
+    else:
+        raise FileNotFoundError(f"Missing prices: {prices_parq} (or {prices_csv})")
+
+    if "Date" not in df.columns or "Ticker" not in df.columns:
+        raise ValueError("prices must have Date,Ticker")
+    for c in ["Close"]:
+        if c not in df.columns:
+            raise ValueError(f"prices missing {c}")
+
+    df = df.copy()
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce").dt.tz_localize(None)
+    df["Ticker"] = df["Ticker"].astype(str).str.upper().str.strip()
+    df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
+    df = df.dropna(subset=["Date", "Ticker", "Close"]).sort_values(["Ticker", "Date"]).reset_index(drop=True)
+    return df
 
 
-def _clip01(x: float) -> float:
-    if not np.isfinite(x):
-        return 0.0
-    return float(min(1.0, max(0.0, x)))
+def _find_suffix_from_summary_path(p: Path) -> str:
+    # gate_summary_<TAG>_gate_<SUFFIX>.csv
+    name = p.name
+    m = re.match(r"gate_summary_(.+)_gate_(.+)\.csv$", name)
+    if m:
+        return m.group(2)
+    # fallback
+    return p.stem.replace("gate_summary_", "")
 
 
-def leverage_adjust(seed_mult: float, max_lev_pct: float, lam: float = 0.5) -> float:
+def _curve_path(signals_dir: Path, tag: str, suffix: str) -> Path:
+    return signals_dir / f"sim_engine_curve_{tag}_gate_{suffix}.parquet"
+
+
+def _trades_path(signals_dir: Path, tag: str, suffix: str) -> Path:
+    return signals_dir / f"sim_engine_trades_{tag}_gate_{suffix}.parquet"
+
+
+def _safe_to_dt(x) -> pd.Series:
+    return pd.to_datetime(x, errors="coerce").dt.tz_localize(None)
+
+
+def _calc_cagr(start_equity: float, end_equity: float, days: float) -> float:
+    if not np.isfinite(start_equity) or not np.isfinite(end_equity) or start_equity <= 0 or end_equity <= 0:
+        return float("nan")
+    if not np.isfinite(days) or days <= 0:
+        return float("nan")
+    years = days / 365.0
+    if years <= 0:
+        return float("nan")
+    return float((end_equity / start_equity) ** (1.0 / years) - 1.0)
+
+
+def _qqq_stats(prices: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp) -> tuple[float, float, float]:
     """
-    교정된 수익(배수) 예시:
-    - seed_mult: 시드 배수 (예: 3.2)
-    - max_lev_pct: 최대 레버리지 비율 (예: 0.8 => 최대 대출이 entry_seed의 80%)
-    - lam: 페널티 강도 (0~1 정도 권장)
-    공식은 "원금 1배 초과분"에 대해서만 페널티를 줌:
-      adj = 1 + (seed_mult - 1) / (1 + lam * max_lev_pct)
-
-    직관:
-    - seed_mult가 같으면 레버가 낮을수록 adj가 커짐
-    - max_lev_pct=0이면 adj=seed_mult
+    Return (qqq_seed_multiple, qqq_cagr, days)
+    - Uses last available close on/after start and last available close on/before end
     """
-    if not np.isfinite(seed_mult):
-        return np.nan
-    base = float(seed_mult)
-    if base <= 0:
-        return base
-    lev = max(0.0, float(max_lev_pct)) if np.isfinite(max_lev_pct) else 0.0
-    lam = float(lam) if np.isfinite(lam) else 0.5
-    excess = base - 1.0
-    return float(1.0 + excess / (1.0 + lam * lev))
+    q = prices.loc[prices["Ticker"] == "QQQ"].copy()
+    if q.empty:
+        return (float("nan"), float("nan"), float("nan"))
+
+    q = q.sort_values("Date")
+    # pick start price: first close with Date >= start
+    q_start = q.loc[q["Date"] >= start]
+    if q_start.empty:
+        return (float("nan"), float("nan"), float("nan"))
+    p0 = float(q_start["Close"].iloc[0])
+
+    # pick end price: last close with Date <= end
+    q_end = q.loc[q["Date"] <= end]
+    if q_end.empty:
+        return (float("nan"), float("nan"), float("nan"))
+    p1 = float(q_end["Close"].iloc[-1])
+
+    if not np.isfinite(p0) or p0 <= 0 or not np.isfinite(p1) or p1 <= 0:
+        return (float("nan"), float("nan"), float("nan"))
+
+    mult = p1 / p0
+    days = float((end - start).days)
+    cagr = _calc_cagr(1.0, mult, days)  # treat as seed multiple
+    return (float(mult), float(cagr), float(days))
+
+
+def enrich_one_summary(
+    row: pd.Series,
+    signals_dir: Path,
+    prices: pd.DataFrame,
+) -> dict:
+    """
+    Add:
+      - WarmupEndDate (first EntryDate)
+      - BacktestDaysAfterWarmup
+      - IdleDaysAfterWarmup / IdlePctAfterWarmup
+      - CAGR_AfterWarmup
+      - QQQ_SeedMultiple_SamePeriod / QQQ_CAGR_SamePeriod
+      - ActiveDaysAfterWarmup
+    """
+    tag = str(row.get("TAG", "run"))
+    suffix = str(row.get("GateSuffix", ""))
+
+    out = {}
+
+    cpath = _curve_path(signals_dir, tag, suffix)
+    tpath = _trades_path(signals_dir, tag, suffix)
+
+    if (not cpath.exists()) or (not tpath.exists()):
+        # if missing, just NaN fields
+        out.update({
+            "WarmupEndDate": "",
+            "BacktestDaysAfterWarmup": np.nan,
+            "ActiveDaysAfterWarmup": np.nan,
+            "IdleDaysAfterWarmup": np.nan,
+            "IdlePctAfterWarmup": np.nan,
+            "CAGR_AfterWarmup": np.nan,
+            "QQQ_SeedMultiple_SamePeriod": np.nan,
+            "QQQ_CAGR_SamePeriod": np.nan,
+        })
+        return out
+
+    trades = pd.read_parquet(tpath)
+    if trades.empty or "EntryDate" not in trades.columns:
+        out.update({
+            "WarmupEndDate": "",
+            "BacktestDaysAfterWarmup": np.nan,
+            "ActiveDaysAfterWarmup": np.nan,
+            "IdleDaysAfterWarmup": np.nan,
+            "IdlePctAfterWarmup": np.nan,
+            "CAGR_AfterWarmup": np.nan,
+            "QQQ_SeedMultiple_SamePeriod": np.nan,
+            "QQQ_CAGR_SamePeriod": np.nan,
+        })
+        return out
+
+    entry = _safe_to_dt(trades["EntryDate"]).dropna()
+    if entry.empty:
+        out.update({
+            "WarmupEndDate": "",
+            "BacktestDaysAfterWarmup": np.nan,
+            "ActiveDaysAfterWarmup": np.nan,
+            "IdleDaysAfterWarmup": np.nan,
+            "IdlePctAfterWarmup": np.nan,
+            "CAGR_AfterWarmup": np.nan,
+            "QQQ_SeedMultiple_SamePeriod": np.nan,
+            "QQQ_CAGR_SamePeriod": np.nan,
+        })
+        return out
+
+    warmup_end = entry.min()
+
+    curve = pd.read_parquet(cpath)
+    if curve.empty or "Date" not in curve.columns or "Equity" not in curve.columns:
+        out.update({
+            "WarmupEndDate": str(warmup_end.date()),
+            "BacktestDaysAfterWarmup": np.nan,
+            "ActiveDaysAfterWarmup": np.nan,
+            "IdleDaysAfterWarmup": np.nan,
+            "IdlePctAfterWarmup": np.nan,
+            "CAGR_AfterWarmup": np.nan,
+            "QQQ_SeedMultiple_SamePeriod": np.nan,
+            "QQQ_CAGR_SamePeriod": np.nan,
+        })
+        return out
+
+    curve = curve.copy()
+    curve["Date"] = _safe_to_dt(curve["Date"])
+    curve["Equity"] = pd.to_numeric(curve["Equity"], errors="coerce")
+    if "InCycle" in curve.columns:
+        inc = pd.to_numeric(curve["InCycle"], errors="coerce").fillna(0).astype(int)
+    elif "InPosition" in curve.columns:
+        inc = pd.to_numeric(curve["InPosition"], errors="coerce").fillna(0).astype(int)
+    else:
+        inc = pd.Series([0] * len(curve), index=curve.index)
+
+    curve = curve.dropna(subset=["Date", "Equity"]).sort_values("Date").reset_index(drop=True)
+
+    # only after warmup_end (include warmup_end day)
+    cur2 = curve.loc[curve["Date"] >= warmup_end].copy()
+    if cur2.empty:
+        out.update({
+            "WarmupEndDate": str(warmup_end.date()),
+            "BacktestDaysAfterWarmup": np.nan,
+            "ActiveDaysAfterWarmup": np.nan,
+            "IdleDaysAfterWarmup": np.nan,
+            "IdlePctAfterWarmup": np.nan,
+            "CAGR_AfterWarmup": np.nan,
+            "QQQ_SeedMultiple_SamePeriod": np.nan,
+            "QQQ_CAGR_SamePeriod": np.nan,
+        })
+        return out
+
+    inc2 = inc.loc[cur2.index] if inc.index.equals(curve.index) else pd.to_numeric(cur2.get("InCycle", 0), errors="coerce").fillna(0).astype(int)
+
+    start_date = cur2["Date"].iloc[0]
+    end_date = cur2["Date"].iloc[-1]
+    days = float((end_date - start_date).days)
+
+    start_eq = float(cur2["Equity"].iloc[0])
+    end_eq = float(cur2["Equity"].iloc[-1])
+
+    cagr = _calc_cagr(start_eq, end_eq, days)
+
+    total_days = int(cur2["Date"].nunique())
+    active_days = int((inc2 > 0).sum())
+    idle_days = int(max(0, total_days - active_days))
+    idle_pct = float(idle_days / total_days) if total_days > 0 else float("nan")
+
+    qqq_mult, qqq_cagr, _ = _qqq_stats(prices, start_date, end_date)
+
+    out.update({
+        "WarmupEndDate": str(warmup_end.date()),
+        "BacktestDaysAfterWarmup": days,
+        "ActiveDaysAfterWarmup": active_days,
+        "IdleDaysAfterWarmup": idle_days,
+        "IdlePctAfterWarmup": idle_pct,
+        "CAGR_AfterWarmup": cagr,
+        "QQQ_SeedMultiple_SamePeriod": qqq_mult,
+        "QQQ_CAGR_SamePeriod": qqq_cagr,
+    })
+    return out
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Aggregate gate_summary_*.csv and compute leverage-adjusted metrics.")
+    ap = argparse.ArgumentParser()
     ap.add_argument("--signals-dir", default="data/signals", type=str)
-    ap.add_argument("--pattern", default="gate_summary_*.csv", type=str)
-
     ap.add_argument("--out-aggregate", default="data/signals/gate_grid_aggregate.csv", type=str)
     ap.add_argument("--out-top", default="data/signals/gate_grid_top_by_recent10y.csv", type=str)
+    ap.add_argument("--pattern", default="gate_summary_*.csv", type=str)
+    ap.add_argument("--topn", default=50, type=int)
 
-    ap.add_argument("--topn", default=30, type=int)
-
-    # leverage penalty strength (this is only for ranking; your hard cap is enforced by engine)
-    ap.add_argument("--lambda-lev", default=0.5, type=float)
+    ap.add_argument("--prices-parq", default="data/raw/prices.parquet", type=str)
+    ap.add_argument("--prices-csv", default="data/raw/prices.csv", type=str)
 
     args = ap.parse_args()
 
-    sig_dir = Path(args.signals_dir)
-    sig_dir.mkdir(parents=True, exist_ok=True)
+    signals_dir = Path(args.signals_dir)
+    if not signals_dir.exists():
+        raise FileNotFoundError(f"signals dir not found: {signals_dir}")
 
-    paths = sorted(glob.glob(str(sig_dir / args.pattern)))
-    if not paths:
-        raise FileNotFoundError(f"No summary files matched: {sig_dir / args.pattern}")
+    summaries = sorted(signals_dir.glob(args.pattern))
+    if not summaries:
+        raise FileNotFoundError(f"No summary files found: {signals_dir}/{args.pattern}")
+
+    prices = _read_prices(Path(args.prices_parq), Path(args.prices_csv))
 
     rows = []
-    for p in paths:
-        df = _read_csv_safe(p)
-        if df is None:
+    for sp in summaries:
+        df = _read_csv(sp)
+        if df.empty:
             continue
-        # gate_summary is 1-row csv
-        r = df.iloc[0].to_dict()
-        r["_summary_path"] = str(p)
-        rows.append(r)
+        row = df.iloc[0].copy()
 
-    if not rows:
-        raise RuntimeError("No readable summary rows.")
+        # normalize expected fields from summarize_sim_trades.py
+        # TAG and GateSuffix must exist
+        if "TAG" not in row.index:
+            row["TAG"] = "run"
+        if "GateSuffix" not in row.index:
+            row["GateSuffix"] = _find_suffix_from_summary_path(sp)
+
+        enriched = enrich_one_summary(row, signals_dir=signals_dir, prices=prices)
+        for k, v in enriched.items():
+            row[k] = v
+
+        rows.append(row)
 
     out = pd.DataFrame(rows)
 
-    # Normalize important columns
-    for col in [
-        "SeedMultiple",
-        "Recent10Y_SeedMultiple",
+    # ---- robust numeric conversions for scoring columns
+    for c in [
+        "Recent10Y_SeedMultiple", "SeedMultiple",
+        "MaxHoldingDaysObserved", "MaxExtendDaysObserved",
+        "CycleCount", "SuccessRate",
         "MaxLeveragePct",
-        "MaxHoldingDaysObserved",
-        "MaxExtendDaysObserved",
-        "CycleCount",
-        "SuccessRate",
+        "CAGR_AfterWarmup", "QQQ_CAGR_SamePeriod",
+        "IdlePctAfterWarmup",
     ]:
-        if col in out.columns:
-            out[col] = pd.to_numeric(out[col], errors="coerce")
+        if c in out.columns:
+            out[c] = pd.to_numeric(out[c], errors="coerce")
 
-    # Backward compatible column name variants (if your summaries used different names before)
-    if "MaxLeveragePct" not in out.columns and "Max_LeveragePct_Closed" in out.columns:
-        out["MaxLeveragePct"] = pd.to_numeric(out["Max_LeveragePct_Closed"], errors="coerce")
+    # ---- add a simple "lever-adjusted" score (optional)
+    # This keeps your existing idea: higher seed multiple, lower leverage peak
+    if "SeedMultiple" in out.columns and "MaxLeveragePct" in out.columns:
+        lev = out["MaxLeveragePct"].fillna(0.0)
+        sm = out["SeedMultiple"].fillna(np.nan)
+        # penalize leverage: divide by (1 + lev)
+        out["SeedMultiple_LevAdj"] = sm / (1.0 + lev)
 
-    if "MaxExtendDaysObserved" not in out.columns and "Max_Extend_Over_MaxDays" in out.columns:
-        out["MaxExtendDaysObserved"] = pd.to_numeric(out["Max_Extend_Over_MaxDays"], errors="coerce")
+    # ---- sort aggregate: prefer SeedMultiple first, then LevAdj, then CAGR
+    sort_cols = []
+    if "SeedMultiple" in out.columns:
+        sort_cols.append("SeedMultiple")
+    if "SeedMultiple_LevAdj" in out.columns:
+        sort_cols.append("SeedMultiple_LevAdj")
+    if "CAGR_AfterWarmup" in out.columns:
+        sort_cols.append("CAGR_AfterWarmup")
 
-    # Safety defaults
-    if "MaxLeveragePct" not in out.columns:
-        out["MaxLeveragePct"] = 0.0
-    out["MaxLeveragePct"] = out["MaxLeveragePct"].fillna(0.0).clip(lower=0.0)
+    if sort_cols:
+        out = out.sort_values(sort_cols, ascending=[False] * len(sort_cols))
 
-    if "SuccessRate" in out.columns:
-        out["SuccessRate"] = out["SuccessRate"].fillna(0.0).clip(lower=0.0, upper=1.0)
-    else:
-        out["SuccessRate"] = 0.0
+    out_path = Path(args.out_aggregate)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out.to_csv(out_path, index=False)
+    print(f"[DONE] wrote aggregate: {out_path} rows={len(out)}")
 
-    if "CycleCount" in out.columns:
-        out["CycleCount"] = out["CycleCount"].fillna(0).astype(int)
-    else:
-        out["CycleCount"] = 0
+    # ---- Top-by-recent10y (너가 계속 보던 지표 유지)
+    top = out.copy()
+    if "Recent10Y_SeedMultiple" in top.columns:
+        top = top.sort_values(["Recent10Y_SeedMultiple"], ascending=[False])
+    top = top.head(int(args.topn))
+    top_path = Path(args.out_top)
+    top.to_csv(top_path, index=False)
+    print(f"[DONE] wrote top: {top_path} rows={len(top)}")
 
-    # Compute leverage-adjusted seed multiples
-    lam_lev = float(args.lambda_lev)
-
-    out["Adj_SeedMultiple"] = [
-        leverage_adjust(_safe_float(sm), _safe_float(lv, 0.0), lam=lam_lev)
-        for sm, lv in zip(out.get("SeedMultiple", pd.Series([np.nan]*len(out))), out["MaxLeveragePct"])
-    ]
-
-    out["Adj_Recent10Y_SeedMultiple"] = [
-        leverage_adjust(_safe_float(sm), _safe_float(lv, 0.0), lam=lam_lev)
-        for sm, lv in zip(out.get("Recent10Y_SeedMultiple", pd.Series([np.nan]*len(out))), out["MaxLeveragePct"])
-    ]
-
-    # A simple composite score for ranking (you can change this anytime)
-    # Priority: Adj_Recent10Y > Adj_AllTime, then leverage lower, then success higher
-    # (NaN-safe)
-    out["Score"] = (
-        pd.to_numeric(out["Adj_Recent10Y_SeedMultiple"], errors="coerce").fillna(0.0) * 1.0
-        + pd.to_numeric(out["Adj_SeedMultiple"], errors="coerce").fillna(0.0) * 0.3
-        - out["MaxLeveragePct"].fillna(0.0) * 0.10
-        + out["SuccessRate"].fillna(0.0) * 0.05
-    )
-
-    # Sort (best first)
-    out_sorted = out.sort_values(
-        by=["Adj_Recent10Y_SeedMultiple", "Adj_SeedMultiple", "MaxLeveragePct", "SuccessRate", "CycleCount"],
-        ascending=[False, False, True, False, False],
-        na_position="last",
-    ).reset_index(drop=True)
-
-    out_agg_path = Path(args.out_aggregate)
-    out_agg_path.parent.mkdir(parents=True, exist_ok=True)
-    out_sorted.to_csv(out_agg_path, index=False)
-    print(f"[DONE] wrote aggregate: {out_agg_path} rows={len(out_sorted)}")
-
-    # TopN view by recent10y (adjusted)
-    topn = int(args.topn)
-    top = out_sorted.head(topn).copy()
-    out_top_path = Path(args.out_top)
-    out_top_path.parent.mkdir(parents=True, exist_ok=True)
-    top.to_csv(out_top_path, index=False)
-    print(f"[DONE] wrote top: {out_top_path} rows={len(top)}")
-
-    # Quick console peek
-    cols = [
-        "TAG", "GateSuffix",
-        "Recent10Y_SeedMultiple", "Adj_Recent10Y_SeedMultiple",
-        "SeedMultiple", "Adj_SeedMultiple",
-        "MaxLeveragePct", "MaxExtendDaysObserved", "CycleCount", "SuccessRate"
-    ]
-    cols = [c for c in cols if c in out_sorted.columns]
-    print("\n[TOP 10]")
-    print(out_sorted[cols].head(10).to_string(index=False))
+    # ---- quick headline
+    if len(out):
+        best = out.iloc[0].to_dict()
+        print("=" * 60)
+        print("[BEST] (by SeedMultiple / LevAdj / CAGR)")
+        print(f"TAG={best.get('TAG')} suffix={best.get('GateSuffix')}")
+        print(f"SeedMultiple={best.get('SeedMultiple')}  Recent10Y={best.get('Recent10Y_SeedMultiple')}")
+        print(f"CAGR_AfterWarmup={best.get('CAGR_AfterWarmup')}  QQQ_CAGR={best.get('QQQ_CAGR_SamePeriod')}")
+        print(f"IdlePctAfterWarmup={best.get('IdlePctAfterWarmup')}  MaxLevPct={best.get('MaxLeveragePct')}")
+        print("=" * 60)
 
 
 if __name__ == "__main__":
