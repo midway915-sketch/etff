@@ -19,54 +19,32 @@ on:
         description: "extend horizon tag + strategy label horizon add (e.g. 30)"
         required: true
         default: "30"
+
       p_tail_thresholds:
-        description: "comma-separated p_tail thresholds (e.g. 0.15,0.25,0.35)"
+        description: "comma-separated p_tail thresholds (e.g. 0.10,0.20,0.30)"
         required: true
-        # 수익률 우선이면 gate 빡세게 하지 말고 '극단 위험만' 컷
         default: "0.10,0.20,0.30"
       utility_quantiles:
         description: "comma-separated utility quantiles (e.g. 0.60,0.75,0.90)"
         required: true
-        # 수익률 우선이면 문턱 낮게부터 같이 봄
         default: "0.60,0.75,0.90"
       rank_metrics:
-        description: "comma-separated rank metric (utility|ret_score|p_success)"
+        description: "comma-separated rank metric (utility|ret_score|p_success). e.g. utility,ret_score"
         required: true
-        # 수익률 우선: ret_score도 같이 보는 게 유리한 경우 많음
         default: "utility,ret_score"
       lambda_tail:
-        description: "utility tail penalty lambda (e.g. 0.05)"
+        description: "utility tail penalty lambda (single float, e.g. 0.05)"
         required: true
         default: "0.05"
+
       rebuild_all:
         description: "true to rebuild prices/features/labels/models from scratch"
         required: true
         default: "false"
 
-      # ---- 추가(수익률 점프용)
-      enable_trailing:
-        description: "true to enable 2-step exit (TP1 + trailing stop)"
-        required: true
-        default: "true"
-      tp1_frac:
-        description: "fraction to sell at profit target (e.g. 0.50)"
-        required: true
-        default: "0.50"
-      trail_stops:
-        description: "comma-separated trailing stops (e.g. 0.08,0.10,0.12)"
-        required: true
-        default: "0.08,0.10,0.12"
-      topk_configs:
-        description: "TopK configs: '1|1.0;2|0.7,0.3;2|0.6,0.4'"
-        required: true
-        default: "1|1.0;2|0.7,0.3;2|0.6,0.4"
-      exclude_tickers:
-        description: "comma-separated tickers to exclude from candidates (e.g. SPY,^VIX)"
-        required: true
-        default: "SPY,^VIX"
-
   schedule:
-    - cron: "10 23 * * *"  # 매일 KST 08:10
+    # 매일 한국시간 08:10 (UTC 23:10)
+    - cron: "10 23 * * *"
 
 jobs:
   grid:
@@ -100,31 +78,23 @@ jobs:
           set -euo pipefail
           mkdir -p data/raw data/features data/labels data/signals data/meta app scripts data/_backup
 
-      - name: Set LABEL env (safe for cache keys)
+      - name: Set env keys
         shell: bash
         run: |
           set -euo pipefail
-          PT="${{ inputs.profit_target }}"
-          H="${{ inputs.max_days }}"
-          SL="${{ inputs.stop_level }}"
-          EX="${{ inputs.max_extend_days }}"
-          # pt10_h40_sl10_ex30 style
-          PTI=$(python - <<'PY'
-          import os
-          pt=float(os.environ["PT"])
+          # NOTE: cache key에는 comma가 들어가면 안되므로 label_spec은 쉼표 대신 _ 로 구성
+          echo "LABEL_KEY=pt$(python - <<'PY'
+          pt=float("${{ inputs.profit_target }}")
           print(int(round(pt*100)))
           PY
-                    )
-                    SLI=$(python - <<'PY'
-          import os
-          sl=float(os.environ["SL"])
+          )_h${{ inputs.max_days }}_sl$(python - <<'PY'
+          sl=float("${{ inputs.stop_level }}")
           print(int(round(abs(sl)*100)))
           PY
-          )
-          echo "LABEL_KEY=pt${PTI}_h${H}_sl${SLI}_ex${EX}" >> $GITHUB_ENV
-        env:
-          PT: ${{ inputs.profit_target }}
-          SL: ${{ inputs.stop_level }}
+          )_ex${{ inputs.max_extend_days }}" >> $GITHUB_ENV
+
+          # 10년만 돌릴 거니까 가격 시작일 고정(오늘 기준 대략 10y + 워밍업)
+          echo "PRICE_START=2015-02-21" >> $GITHUB_ENV
 
       # ---- PRICES cache
       - name: Restore cache (PRICES)
@@ -145,11 +115,11 @@ jobs:
           path: |
             data/features/features_model.parquet
             data/features/features_model.csv
-          key: mumumeme-features-v3-${{ runner.os }}-${{ hashFiles('data/universe.csv','scripts/universe.py','scripts/fetch_prices.py','scripts/build_features.py','scripts/build_ev_features.py','scripts/merge_incremental_table.py') }}
+          key: mumumeme-features-v3-${{ runner.os }}-${{ hashFiles('data/universe.csv','scripts/universe.py','scripts/fetch_prices.py','scripts/build_features.py') }}
           restore-keys: |
             mumumeme-features-v3-${{ runner.os }}-
 
-      # ---- MODEL cache
+      # ---- MODEL cache (labels+model)
       - name: Restore cache (MODEL)
         uses: actions/cache@v4
         with:
@@ -158,94 +128,69 @@ jobs:
             data/labels/labels_model.csv
             app/model.pkl
             app/scaler.pkl
-            data/meta/build_fingerprint.json
-          key: mumumeme-model-v3-${{ runner.os }}-${{ env.LABEL_KEY }}-${{ hashFiles('scripts/build_labels.py','scripts/train_model.py','scripts/check_rebuild.py','scripts/merge_incremental_table.py') }}
+          key: mumumeme-model-v3-${{ runner.os }}-${{ env.LABEL_KEY }}-${{ hashFiles('scripts/build_labels.py','scripts/train_model.py') }}
           restore-keys: |
             mumumeme-model-v3-${{ runner.os }}-${{ env.LABEL_KEY }}-
             mumumeme-model-v3-${{ runner.os }}-
 
-      - name: Fingerprint check (partial rebuild flags)
-        shell: bash
-        run: |
-          set -euo pipefail
-          python scripts/check_rebuild.py \
-            --fingerprint-path data/meta/build_fingerprint.json \
-            --label-spec "${{ env.LABEL_KEY }}" \
-            --features-files "scripts/build_features.py,scripts/build_ev_features.py,scripts/merge_incremental_table.py" \
-            --labels-files "scripts/build_labels.py,scripts/train_model.py,scripts/merge_incremental_table.py" \
-            --universe-files "scripts/universe.py,data/universe.csv" \
-            --strategy-files "scripts/predict_gate.py,scripts/simulate_single_position_engine.py,scripts/run_grid_workflow.sh,scripts/summarize_sim_trades.py,scripts/aggregate_gate_grid.py" \
-            | tail -n 4 >> $GITHUB_ENV
-
-      - name: Prepare required files (incremental)
+      - name: Prepare required files (10y only + partial rebuild)
         shell: bash
         env:
           REBUILD_ALL: ${{ inputs.rebuild_all }}
-          REBUILD_PRICES: ${{ env.REBUILD_PRICES }}
-          REBUILD_FEATURES: ${{ env.REBUILD_FEATURES }}
-          REBUILD_MODEL: ${{ env.REBUILD_MODEL }}
-          CLEAR_SIGNALS: ${{ env.CLEAR_SIGNALS }}
+          PRICE_START: ${{ env.PRICE_START }}
 
           PROFIT_TARGET: ${{ inputs.profit_target }}
           MAX_DAYS: ${{ inputs.max_days }}
           STOP_LEVEL: ${{ inputs.stop_level }}
+          MAX_EXTEND_DAYS: ${{ inputs.max_extend_days }}
 
         run: |
           set -euo pipefail
 
           if [ "$REBUILD_ALL" = "true" ]; then
-            REBUILD_PRICES="1"; REBUILD_FEATURES="1"; REBUILD_MODEL="1"; CLEAR_SIGNALS="1"
+            rm -rf data/raw/* data/features/* data/labels/* app/* data/signals/* || true
           fi
 
-          if [ "${CLEAR_SIGNALS:-0}" = "1" ]; then
-            rm -rf data/signals/* || true
-          fi
-
-          if [ "${REBUILD_PRICES:-0}" = "1" ]; then
-            rm -f data/raw/prices.parquet data/raw/prices.csv data/raw/prices_meta.json || true
-            rm -f data/features/features_model.parquet data/features/features_model.csv || true
-            rm -f data/labels/labels_model.parquet data/labels/labels_model.csv || true
-            rm -f app/model.pkl app/scaler.pkl || true
-          elif [ "${REBUILD_FEATURES:-0}" = "1" ]; then
-            rm -f data/features/features_model.parquet data/features/features_model.csv || true
-            rm -f data/labels/labels_model.parquet data/labels/labels_model.csv || true
-            rm -f app/model.pkl app/scaler.pkl || true
-          elif [ "${REBUILD_MODEL:-0}" = "1" ]; then
-            rm -f data/labels/labels_model.parquet data/labels/labels_model.csv || true
-            rm -f app/model.pkl app/scaler.pkl || true
-          fi
-
+          # 1) universe + prices (10y만)
           python scripts/universe.py
-
-          # prices
           if [ ! -f data/raw/prices.parquet ] && [ ! -f data/raw/prices.csv ]; then
-            python scripts/fetch_prices.py --include-extra --reset --force-full
+            python scripts/fetch_prices.py --include-extra --reset --force-full --start "$PRICE_START"
           else
-            python scripts/fetch_prices.py --include-extra --lookback-days 10
+            python scripts/fetch_prices.py --include-extra --lookback-days 10 --start "$PRICE_START"
           fi
 
-          # features
+          # 2) features
           if [ ! -f data/features/features_model.parquet ] && [ ! -f data/features/features_model.csv ]; then
-            python scripts/build_features.py
+            # 섹터 강도 포함(너가 원한 방향)
+            python scripts/build_features.py --enable-sector-strength
+          else
+            echo "[INFO] features_model exists -> reuse"
           fi
 
-          # labels
+          # 3) labels (p_success 학습 데이터)
           if [ ! -f data/labels/labels_model.parquet ] && [ ! -f data/labels/labels_model.csv ]; then
             python scripts/build_labels.py \
               --profit-target "$PROFIT_TARGET" \
               --max-days "$MAX_DAYS" \
-              --stop-level "$STOP_LEVEL"
+              --stop-level "$STOP_LEVEL" \
+              --max-extend-days "$MAX_EXTEND_DAYS"
+          else
+            echo "[INFO] labels_model exists -> reuse"
           fi
 
-          # model
+          # 4) model.pkl / scaler.pkl
           if [ ! -f app/model.pkl ] || [ ! -f app/scaler.pkl ]; then
             python scripts/train_model.py
+          else
+            echo "[INFO] model exists -> reuse"
           fi
 
       - name: Run gate grid (predict + simulate + summarize)
         shell: bash
         env:
           LABEL_KEY: ${{ env.LABEL_KEY }}
+          PRICE_START: ${{ env.PRICE_START }}
+
           PROFIT_TARGET: ${{ inputs.profit_target }}
           MAX_DAYS: ${{ inputs.max_days }}
           STOP_LEVEL: ${{ inputs.stop_level }}
@@ -255,17 +200,26 @@ jobs:
           UTILITY_QUANTILES: ${{ inputs.utility_quantiles }}
           RANK_METRICS: ${{ inputs.rank_metrics }}
           LAMBDA_TAIL: ${{ inputs.lambda_tail }}
+
+          # Gate modes (너가 정한 후보 4개)
           GATE_MODES: "none,tail,utility,tail_utility"
 
-          ENABLE_TRAILING: ${{ inputs.enable_trailing }}
-          TP1_FRAC: ${{ inputs.tp1_frac }}
-          TRAIL_STOPS: ${{ inputs.trail_stops }}
+          # ✅ 수익률 우선: TP1 + trailing
+          ENABLE_TRAILING: "true"
+          TP1_FRAC: "0.50"
+          TRAIL_STOPS: "0.08,0.10,0.12"
 
-          TOPK_CONFIGS: ${{ inputs.topk_configs }}
+          # ✅ Top-1 vs Top-2 비교
+          TOPK_CONFIGS: "1|1.0;2|0.7,0.3;2|0.6,0.4"
+
+          # ✅ p_success 최소컷도 같이 그리드(너가 원했던 것)
+          PS_MINS: "0.00,0.50,0.60,0.70"
+
+          # ✅ 레버 상한(진입~연장 전구간)
+          MAX_LEVERAGE_PCT: "1.00"
+
           OUT_DIR: "data/signals"
-          EXCLUDE_TICKERS: ${{ inputs.exclude_tickers }}
-
-          # strict precheck (없으면 터짐). 필요 없으면 "" 로 두면 됨.
+          EXCLUDE_TICKERS: "SPY,^VIX"
           REQUIRE_FILES: "data/features/features_model.parquet,app/model.pkl,app/scaler.pkl"
 
         run: |
@@ -284,12 +238,11 @@ jobs:
             --pattern "gate_summary_*.csv" \
             --topn 50
 
-      - name: Upload artifacts (signals + meta)
+      - name: Upload artifacts (signals)
         uses: actions/upload-artifact@v4
         with:
           name: gate-grid-results
           path: |
-            data/meta/build_fingerprint.json
             data/signals/gate_summary_*.csv
             data/signals/gate_grid_aggregate.csv
             data/signals/gate_grid_top_by_recent10y.csv
