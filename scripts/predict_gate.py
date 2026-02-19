@@ -58,16 +58,13 @@ def ensure_date_ticker_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     # If Date is missing, try to pull it from index even if index is unnamed.
     if "Date" not in out.columns:
-        # If index looks like datetime (DatetimeIndex or convertible), reset_index and rename
         if not isinstance(out.index, pd.RangeIndex):
             idx = out.index
-            # DatetimeIndex
             if isinstance(idx, pd.DatetimeIndex):
                 out = out.reset_index()
                 if "index" in out.columns and "Date" not in out.columns:
                     out = out.rename(columns={"index": "Date"})
             else:
-                # try convert index values to datetime safely
                 try:
                     tmp = pd.to_datetime(idx, errors="coerce")
                     if tmp.notna().any():
@@ -166,7 +163,6 @@ def gate_filter(
 
     if mode == "utility":
         q = float(utility_quantile)
-        # per-date quantile threshold (vectorized)
         thr = d.groupby("Date")["utility"].transform(lambda s: s.quantile(q))
         return d[d["utility"] >= thr].copy()
 
@@ -231,6 +227,11 @@ def main() -> None:
     ap.add_argument("--topk", type=int, required=True)
     ap.add_argument("--ps-min", type=float, required=True)
 
+    # ✅ SUB entry filters (anti-chasing)
+    ap.add_argument("--sub-ps-min", type=float, required=True, help="SUB entry filter: p_success >= this")
+    ap.add_argument("--sub-z-max", type=float, required=True, help="SUB entry filter: Z_score <= this")
+    ap.add_argument("--sub-dd60-max", type=float, required=True, help="SUB entry filter: Drawdown_60 <= this (e.g. -0.05)")
+
     ap.add_argument("--exclude-tickers", type=str, default="")
     ap.add_argument("--out-dir", type=str, required=True)
     ap.add_argument("--require-files", type=str, required=True)
@@ -260,16 +261,28 @@ def main() -> None:
     feats["Ticker"] = feats["Ticker"].astype(str).str.upper().str.strip()
     feats = feats.dropna(subset=["Date", "Ticker"]).sort_values(["Date", "Ticker"]).reset_index(drop=True)
 
+    # core columns
     feats["p_success"] = coerce_num(feats, "p_success", 0.0)
     feats["p_tail"] = coerce_num(feats, "p_tail", 0.0)
     feats["ret_score"] = coerce_num(feats, "ret_score", 0.0)
 
+    # ✅ sub filter feature columns (safe defaults)
+    feats["Z_score"] = coerce_num(feats, "Z_score", 0.0)
+    feats["Drawdown_60"] = coerce_num(feats, "Drawdown_60", 0.0)
+
     feats = apply_exclude_tickers(feats, args.exclude_tickers)
 
-    # base gate: p_success min
+    # base gate: p_success min (MAIN gate)
     feats = feats[feats["p_success"] >= float(args.ps_min)].copy()
 
     feats["utility"] = build_utility(feats, float(args.lambda_tail))
+
+    # ✅ compute SubOK on the *post main ps-min* universe (so SUB never uses stuff MAIN wouldn't consider)
+    feats["SubOK"] = (
+        (feats["p_success"] >= float(args.sub_ps_min)) &
+        (feats["Z_score"] <= float(args.sub_z_max)) &
+        (feats["Drawdown_60"] <= float(args.sub_dd60_max))
+    ).astype(int)
 
     gated = gate_filter(
         feats,
@@ -283,9 +296,16 @@ def main() -> None:
     picks_path = out_dir / f"picks_{args.tag}_gate_{args.suffix}.csv"
     meta_path = out_dir / f"picks_meta_{args.tag}_gate_{args.suffix}.json"
 
-    keep_cols = [c for c in ["Date", "Ticker", "p_success", "p_tail", "ret_score", "utility"] if c in picks.columns]
+    keep_cols = [
+        c for c in [
+            "Date", "Ticker",
+            "p_success", "p_tail", "ret_score", "utility",
+            "Z_score", "Drawdown_60",
+            "SubOK",
+        ]
+        if c in picks.columns
+    ]
     picks_out = picks[keep_cols].copy()
-
     picks_out.to_csv(picks_path, index=False)
 
     meta = {
@@ -307,10 +327,18 @@ def main() -> None:
         "max_days": int(args.max_days),
         "stop_level": float(args.stop_level),
         "max_extend_days": int(args.max_extend_days),
+
+        # SUB filter params (logged)
+        "sub_ps_min": float(args.sub_ps_min),
+        "sub_z_max": float(args.sub_z_max),
+        "sub_dd60_max": float(args.sub_dd60_max),
+        "subok_rate_in_features": float(feats["SubOK"].mean()) if len(feats) else 0.0,
+        "subok_rate_in_gated": float(gated["SubOK"].mean()) if len(gated) and "SubOK" in gated.columns else 0.0,
     }
     meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
     print(f"[DONE] wrote: {picks_path} rows={len(picks_out)}")
+    print(f"[INFO] SubOK rate in feats(after ps-min)={meta['subok_rate_in_features']:.4f} gated={meta['subok_rate_in_gated']:.4f}")
     print(f"[DONE] wrote: {meta_path}")
 
 
