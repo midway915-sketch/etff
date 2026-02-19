@@ -285,6 +285,33 @@ jobs:
           chmod +x scripts/run_grid_workflow.sh
           bash scripts/run_grid_workflow.sh
 
+      - name: Analyze MAIN vs SUB (latest run)
+        shell: bash
+        env:
+          OUT_DIR: "data/signals"
+          LABEL_KEY: ${{ env.LABEL_KEY }}
+        run: |
+          set -euo pipefail
+
+          # 가장 최근에 생성된 trades parquet 1개를 자동 선택
+          latest_trades="$(ls -t ${OUT_DIR}/sim_engine_trades_*_gate_*.parquet | head -n 1 || true)"
+          if [ -z "$latest_trades" ]; then
+            echo "[ERROR] No sim_engine_trades parquet found in ${OUT_DIR}"
+            ls -la "${OUT_DIR}" | sed -n '1,200p'
+            exit 1
+          fi
+
+          echo "[INFO] latest_trades=${latest_trades}"
+
+          # prefix는 파일명에서 parquet 확장자 제거해서 사용 (결과 파일 이름 깔끔)
+          prefix="$(basename "$latest_trades" .parquet)"
+
+          python scripts/analyze_sub_vs_main.py \
+            --trades-path "$latest_trades" \
+            --out-dir "${OUT_DIR}" \
+            --prefix "${prefix}" \
+            --period "Y"
+
       - name: Aggregate summaries
         shell: bash
         run: |
@@ -308,4 +335,6 @@ jobs:
             data/signals/picks_meta_*.json
             data/signals/sim_engine_trades_*.parquet
             data/signals/sim_engine_curve_*.parquet
+            data/signals/*_sub_main_*.csv
+            data/signals/*_sub_worst_*.csv
           if-no-files-found: error
