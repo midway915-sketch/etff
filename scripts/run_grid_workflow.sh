@@ -31,6 +31,11 @@ echo "[INFO] OUT_DIR=$OUT_DIR"
 : "${EXCLUDE_TICKERS:?}"
 : "${REQUIRE_FILES:?}"
 
+# ✅ SUB anti-chasing filters (required)
+: "${SUB_PS_MIN:?}"
+: "${SUB_Z_MAX:?}"
+: "${SUB_DD60_MAX:?}"
+
 # ----- helpers
 split_csv() {
   local s="$1"
@@ -63,6 +68,7 @@ PY
 echo "[INFO] TOPK_CONFIGS=$TOPK_CONFIGS"
 echo "[INFO] TRAIL_STOPS=$TRAIL_STOPS TP1_FRAC=$TP1_FRAC ENABLE_TRAILING=$ENABLE_TRAILING"
 echo "[INFO] PS_MINS=$PS_MINS MAX_LEVERAGE_PCT=$MAX_LEVERAGE_PCT"
+echo "[INFO] SUB filters: SUB_PS_MIN=$SUB_PS_MIN SUB_Z_MAX=$SUB_Z_MAX SUB_DD60_MAX=$SUB_DD60_MAX"
 
 # ----- main loops
 while read -r mode; do
@@ -109,6 +115,9 @@ PY
                 --lambda-tail "$LAMBDA_TAIL" \
                 --topk "$K" \
                 --ps-min "$psmin" \
+                --sub-ps-min "$SUB_PS_MIN" \
+                --sub-z-max "$SUB_Z_MAX" \
+                --sub-dd60-max "$SUB_DD60_MAX" \
                 --exclude-tickers "$EXCLUDE_TICKERS" \
                 --out-dir "$OUT_DIR" \
                 --require-files "$REQUIRE_FILES"
