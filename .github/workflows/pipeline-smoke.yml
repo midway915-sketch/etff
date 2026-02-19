@@ -1,0 +1,73 @@
+name: pipeline-smoke
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "30 0 * * *"  # 09:30 KST
+
+concurrency:
+  group: pipeline-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: |
+            requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Restore raw data cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            data/raw/
+          key: raw-${{ runner.os }}-${{ hashFiles('scripts/universe.py') }}-${{ github.run_number }}
+          restore-keys: |
+            raw-${{ runner.os }}-${{ hashFiles('scripts/universe.py') }}-
+            raw-${{ runner.os }}-
+
+      - name: Build universe.csv
+        run: |
+          python scripts/universe.py
+          ls -la data | sed -n '1,200p'
+          head -n 30 data/universe.csv
+
+      - name: Fetch prices (yfinance)
+        run: |
+          python scripts/fetch_prices.py --include-extra --reset --force-full
+          ls -la data/raw | sed -n '1,200p'
+          python - << 'PY'
+          import json, pathlib
+          p = pathlib.Path("data/raw/prices_meta.json")
+          print(p.read_text())
+          PY
+
+      - name: Upload raw artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: raw-${{ github.run_number }}
+          retention-days: 3
+          path: |
+            data/universe.csv
+            data/raw/

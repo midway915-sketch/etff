@@ -32,18 +32,6 @@ on:
         description: "comma-separated p_success minimum cutoffs (e.g. 0.50,0.60,0.70)"
         required: true
         default: "0.00,0.50,0.60,0.70"
-      sub_ps_min:
-        description: "SUB entry filter: minimum p_success (e.g. 0.60)"
-        required: true
-        default: "0.60"
-      sub_z_max:
-        description: "SUB entry filter: maximum Z_score (e.g. 0.0)"
-        required: true
-        default: "0.0"
-      sub_dd60_max:
-        description: "SUB entry filter: maximum Drawdown_60 (e.g. -0.05)"
-        required: true
-        default: "-0.05"
       rank_metrics:
         description: "comma-separated rank metric (utility|ret_score|p_success). e.g. utility,ret_score"
         required: true
@@ -207,7 +195,8 @@ jobs:
             python scripts/build_labels.py \
               --profit-target "$PROFIT_TARGET" \
               --max-days "$MAX_DAYS" \
-              --stop-level "$STOP_LEVEL"
+              --stop-level "$STOP_LEVEL" \
+              --max-extend-days "$MAX_EXTEND_DAYS"
           else
             echo "[INFO] labels_model exists -> reuse"
           fi
@@ -285,10 +274,6 @@ jobs:
           # ✅ p_success 최소컷도 같이 그리드(너가 원했던 것)
           PS_MINS: ${{ inputs.ps_mins }}
 
-          # ✅ SUB 추격방지 필터 (predict_gate.py -> picks에 SubOK 생성)
-          SUB_PS_MIN: ${{ inputs.sub_ps_min }}
-          SUB_Z_MAX: ${{ inputs.sub_z_max }}
-          SUB_DD60_MAX: ${{ inputs.sub_dd60_max }}
           # ✅ 레버 상한(진입~연장 전구간)
           MAX_LEVERAGE_PCT: "1.00"
 
@@ -300,61 +285,6 @@ jobs:
           set -euo pipefail
           chmod +x scripts/run_grid_workflow.sh
           bash scripts/run_grid_workflow.sh
-
-      - name: Analyze MAIN vs SUB (pick valid trades parquet)
-        shell: bash
-        env:
-          OUT_DIR: "data/signals"
-        run: |
-          set -euo pipefail
-
-          echo "[INFO] candidates:"
-          ls -lt "${OUT_DIR}"/sim_engine_trades_*_gate_*.parquet | sed -n '1,120p' || true
-
-          latest_trades=""
-          for f in $(ls -t ${OUT_DIR}/sim_engine_trades_*_gate_*.parquet 2>/dev/null); do
-            ok="$(python - <<PY
-          import pandas as pd
-          try:
-              df = pd.read_parquet("$f")
-              cols = set(df.columns)
-              # valid if CycleReturn exists OR we can derive it from Invested/Proceeds
-              valid = ("CycleReturn" in cols) or (("Invested" in cols) and ("Proceeds" in cols))
-              print("1" if valid else "0")
-          except Exception as e:
-              print("0")
-          PY
-          )"
-            if [ "$ok" = "1" ]; then
-              latest_trades="$f"
-              break
-            fi
-          done
-
-          if [ -z "$latest_trades" ]; then
-            echo "[ERROR] No valid trades parquet found (needs CycleReturn or Invested+Proceeds)."
-            # 디버그: 가장 최신 파일 1개 컬럼 출력
-            f0="$(ls -t ${OUT_DIR}/sim_engine_trades_*_gate_*.parquet 2>/dev/null | head -n 1 || true)"
-            if [ -n "$f0" ]; then
-              echo "[DEBUG] newest file: $f0"
-              python - <<PY
-          import pandas as pd
-          df = pd.read_parquet("$f0")
-          print("[DEBUG] cols:", list(df.columns))
-          print(df.head(3))
-          PY
-            fi
-            exit 1
-          fi
-
-          echo "[INFO] using trades=${latest_trades}"
-          prefix="$(basename "$latest_trades" .parquet)"
-
-          python scripts/analyze_sub_vs_main.py \
-            --trades-path "$latest_trades" \
-            --out-dir "${OUT_DIR}" \
-            --prefix "${prefix}" \
-            --period "Y"
 
       - name: Aggregate summaries
         shell: bash
@@ -379,6 +309,4 @@ jobs:
             data/signals/picks_meta_*.json
             data/signals/sim_engine_trades_*.parquet
             data/signals/sim_engine_curve_*.parquet
-            data/signals/*_sub_main_*.csv
-            data/signals/*_sub_worst_*.csv
           if-no-files-found: error
