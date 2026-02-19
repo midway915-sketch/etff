@@ -25,27 +25,48 @@ def norm_dt(s: pd.Series) -> pd.Series:
 def safe_float(x) -> float:
     try:
         v = float(x)
-        if np.isfinite(v):
-            return v
-        return np.nan
+        return v if np.isfinite(v) else np.nan
     except Exception:
         return np.nan
 
 
+def ensure_cycle_return(df: pd.DataFrame) -> pd.DataFrame:
+    cols = set(df.columns)
+
+    # if older file missing CycleType, assume MAIN
+    if "CycleType" not in cols:
+        df["CycleType"] = "MAIN"
+
+    # If CycleReturn exists -> ok
+    if "CycleReturn" in cols:
+        df["CycleReturn"] = df["CycleReturn"].apply(safe_float)
+        return df
+
+    # If we can compute from Invested/Proceeds -> do it
+    if ("Invested" in cols) and ("Proceeds" in cols):
+        inv = df["Invested"].apply(safe_float)
+        pro = df["Proceeds"].apply(safe_float)
+        df["CycleReturn"] = np.where(inv > 0, (pro - inv) / inv, np.nan)
+        return df
+
+    # Otherwise, cannot analyze
+    raise ValueError(
+        "Missing CycleReturn (and cannot derive it). "
+        f"cols={list(df.columns)[:80]}"
+    )
+
+
 def agg_stats(df: pd.DataFrame, label: str) -> dict:
-    """Return summary stats for a subset."""
     if df.empty:
         return {"Group": label, "N": 0}
 
     r = df["CycleReturn"].astype(float)
     win = (r > 0).astype(int)
 
-    # basic moments
     mean_r = float(r.mean())
     med_r = float(r.median())
     std_r = float(r.std(ddof=1)) if len(r) > 1 else 0.0
 
-    # win/lose
     win_rate = float(win.mean())
     avg_win = float(r[r > 0].mean()) if (r > 0).any() else np.nan
     avg_loss = float(r[r <= 0].mean()) if (r <= 0).any() else np.nan
@@ -55,20 +76,15 @@ def agg_stats(df: pd.DataFrame, label: str) -> dict:
         else np.nan
     )
 
-    # geometric growth per cycle
-    # NOTE: CycleReturn is (proceeds-invested)/invested, so gross = 1 + r
     gross = (1.0 + r).clip(lower=1e-12)
-    geom_total = float(gross.prod())  # total gross multiple across cycles
-    geom_mean = float(np.exp(np.log(gross).mean()))  # avg gross per cycle
+    geom_total = float(gross.prod())
+    geom_mean = float(np.exp(np.log(gross).mean()))
 
-    # holding days
     hd_col = "HoldingDays" if "HoldingDays" in df.columns else None
     hd_mean = float(df[hd_col].mean()) if hd_col else np.nan
     hd_med = float(df[hd_col].median()) if hd_col else np.nan
 
-    # invested
-    inv = df["Invested"].astype(float) if "Invested" in df.columns else pd.Series([np.nan] * len(df))
-    inv_mean = float(inv.mean()) if inv.notna().any() else np.nan
+    inv_mean = float(df["Invested"].astype(float).mean()) if "Invested" in df.columns else np.nan
 
     return {
         "Group": label,
@@ -89,15 +105,10 @@ def agg_stats(df: pd.DataFrame, label: str) -> dict:
 
 
 def make_period_table(df: pd.DataFrame, period: str) -> pd.DataFrame:
-    """
-    period: 'Y' (year) or 'M' (month)
-    Produces per-period stats by CycleType and total.
-    """
     x = df.copy()
-    x["EntryDate"] = norm_dt(x["EntryDate"])
-    x["Period"] = x["EntryDate"].dt.to_period(period).astype(str)
+    x["EntryDate"] = norm_dt(x["EntryDate"]) if "EntryDate" in x.columns else pd.NaT
+    x["Period"] = pd.to_datetime(x["EntryDate"], errors="coerce").dt.to_period(period).astype(str)
 
-    # per period per type
     out = []
     for (p, ctype), g in x.groupby(["Period", "CycleType"], dropna=False):
         out.append({**{"Period": p, "CycleType": ctype}, **agg_stats(g, label="")})
@@ -106,7 +117,6 @@ def make_period_table(df: pd.DataFrame, period: str) -> pd.DataFrame:
         per = per.drop(columns=["Group"], errors="ignore")
         per = per.sort_values(["Period", "CycleType"]).reset_index(drop=True)
 
-    # also total per period (all types)
     out2 = []
     for p, g in x.groupby(["Period"], dropna=False):
         d = agg_stats(g, label="")
@@ -118,53 +128,39 @@ def make_period_table(df: pd.DataFrame, period: str) -> pd.DataFrame:
         per_all = per_all.drop(columns=["Group"], errors="ignore")
         per_all = per_all.sort_values(["Period"]).reset_index(drop=True)
 
-    # merge (stack)
-    comb = pd.concat([per_all, per], ignore_index=True)
-    return comb
+    return pd.concat([per_all, per], ignore_index=True)
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Analyze MAIN vs SUB performance from sim_engine_trades parquet/csv.")
-    ap.add_argument("--trades-path", required=True, type=str, help="sim_engine_trades_*.parquet (or csv)")
+    ap.add_argument("--trades-path", required=True, type=str)
     ap.add_argument("--out-dir", default="data/signals", type=str)
-    ap.add_argument("--prefix", default="", type=str, help="Optional output prefix")
-    ap.add_argument("--period", default="Y", type=str, choices=["Y", "M"], help="Period granularity for breakdown")
+    ap.add_argument("--prefix", default="", type=str)
+    ap.add_argument("--period", default="Y", type=str, choices=["Y", "M"])
     args = ap.parse_args()
 
     df = read_any(args.trades_path).copy()
 
-    # normalize expected columns
-    if "CycleType" not in df.columns:
-        # if older file without CycleType, treat as MAIN
-        df["CycleType"] = "MAIN"
-
+    # Normalize datetimes if present
     for col in ["EntryDate", "ExitDate"]:
         if col in df.columns:
             df[col] = norm_dt(df[col])
 
-    # ensure CycleReturn numeric
-    if "CycleReturn" not in df.columns:
-        raise ValueError(f"Missing CycleReturn in trades. cols={list(df.columns)[:60]}")
-    df["CycleReturn"] = df["CycleReturn"].apply(safe_float)
-
-    # quick sanity
+    # Ensure CycleReturn exists or is derived
+    df = ensure_cycle_return(df)
     df = df.dropna(subset=["CycleReturn"]).reset_index(drop=True)
     if df.empty:
-        raise ValueError("No valid CycleReturn rows after cleaning.")
+        raise ValueError("No valid rows after cleaning/deriving CycleReturn.")
 
-    # split
     main_df = df[df["CycleType"].astype(str).str.upper() == "MAIN"].copy()
     sub_df = df[df["CycleType"].astype(str).str.upper() == "SUB"].copy()
 
-    # overall stats
     overall = pd.DataFrame([
         agg_stats(df, "ALL"),
         agg_stats(main_df, "MAIN"),
         agg_stats(sub_df, "SUB"),
     ])
 
-    # compute: "ALL vs MAIN only" gross multiple difference
-    # NOTE: This is cycle-level gross product; not portfolio-equity exact, but good diagnostic.
     def gross_prod(x: pd.DataFrame) -> float:
         if x.empty:
             return 1.0
@@ -190,14 +186,11 @@ def main() -> None:
         "Value": lift_vs_main
     }])
 
-    # period breakdown
     per = make_period_table(df, period=args.period)
 
-    # also: identify worst SUB periods quickly
     worst_sub = pd.DataFrame()
     if not sub_df.empty:
         tmp = make_period_table(sub_df, period=args.period)
-        # keep only ALL row inside sub_df breakdown (which is effectively SUB)
         worst_sub = tmp[tmp["CycleType"] == "ALL"].copy()
         if not worst_sub.empty:
             worst_sub = worst_sub.sort_values("MeanReturn").head(10).reset_index(drop=True)
@@ -220,18 +213,18 @@ def main() -> None:
     if not worst_sub.empty:
         worst_sub.to_csv(out_worst, index=False)
 
-    # print summary
     print("=== OVERALL (ALL / MAIN / SUB) ===")
     print(overall.to_string(index=False))
     print("\n=== MULTIPLES (diagnostic) ===")
     print(extra.to_string(index=False))
+
     print(f"\n[DONE] wrote: {out_overall}")
     print(f"[DONE] wrote: {out_extra}")
     print(f"[DONE] wrote: {out_period}")
     if not worst_sub.empty:
         print(f"[DONE] wrote: {out_worst}")
     else:
-        print("[INFO] No SUB rows or no worst-period table created.")
+        print("[INFO] No SUB rows or worst-period table not created.")
 
 
 if __name__ == "__main__":
