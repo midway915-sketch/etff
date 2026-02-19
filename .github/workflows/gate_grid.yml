@@ -285,25 +285,53 @@ jobs:
           chmod +x scripts/run_grid_workflow.sh
           bash scripts/run_grid_workflow.sh
 
-      - name: Analyze MAIN vs SUB (latest run)
+      - name: Analyze MAIN vs SUB (pick valid trades parquet)
         shell: bash
         env:
           OUT_DIR: "data/signals"
-          LABEL_KEY: ${{ env.LABEL_KEY }}
         run: |
           set -euo pipefail
 
-          # 가장 최근에 생성된 trades parquet 1개를 자동 선택
-          latest_trades="$(ls -t ${OUT_DIR}/sim_engine_trades_*_gate_*.parquet | head -n 1 || true)"
+          echo "[INFO] candidates:"
+          ls -lt "${OUT_DIR}"/sim_engine_trades_*_gate_*.parquet | sed -n '1,120p' || true
+
+          latest_trades=""
+          for f in $(ls -t ${OUT_DIR}/sim_engine_trades_*_gate_*.parquet 2>/dev/null); do
+            ok="$(python - <<PY
+          import pandas as pd
+          try:
+              df = pd.read_parquet("$f")
+              cols = set(df.columns)
+              # valid if CycleReturn exists OR we can derive it from Invested/Proceeds
+              valid = ("CycleReturn" in cols) or (("Invested" in cols) and ("Proceeds" in cols))
+              print("1" if valid else "0")
+          except Exception as e:
+              print("0")
+          PY
+          )"
+            if [ "$ok" = "1" ]; then
+              latest_trades="$f"
+              break
+            fi
+          done
+
           if [ -z "$latest_trades" ]; then
-            echo "[ERROR] No sim_engine_trades parquet found in ${OUT_DIR}"
-            ls -la "${OUT_DIR}" | sed -n '1,200p'
+            echo "[ERROR] No valid trades parquet found (needs CycleReturn or Invested+Proceeds)."
+            # 디버그: 가장 최신 파일 1개 컬럼 출력
+            f0="$(ls -t ${OUT_DIR}/sim_engine_trades_*_gate_*.parquet 2>/dev/null | head -n 1 || true)"
+            if [ -n "$f0" ]; then
+              echo "[DEBUG] newest file: $f0"
+              python - <<PY
+          import pandas as pd
+          df = pd.read_parquet("$f0")
+          print("[DEBUG] cols:", list(df.columns))
+          print(df.head(3))
+          PY
+            fi
             exit 1
           fi
 
-          echo "[INFO] latest_trades=${latest_trades}"
-
-          # prefix는 파일명에서 parquet 확장자 제거해서 사용 (결과 파일 이름 깔끔)
+          echo "[INFO] using trades=${latest_trades}"
           prefix="$(basename "$latest_trades" .parquet)"
 
           python scripts/analyze_sub_vs_main.py \
