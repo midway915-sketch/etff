@@ -28,6 +28,10 @@ on:
         description: "comma-separated utility quantiles (e.g. 0.60,0.75,0.90)"
         required: true
         default: "0.60,0.75,0.90"
+      ps_mins:
+        description: "comma-separated p_success minimum cutoffs (e.g. 0.50,0.60,0.70)"
+        required: true
+        default: "0.00,0.50,0.60,0.70"
       rank_metrics:
         description: "comma-separated rank metric (utility|ret_score|p_success). e.g. utility,ret_score"
         required: true
@@ -133,6 +137,23 @@ jobs:
             mumumeme-model-v3-${{ runner.os }}-${{ env.LABEL_KEY }}-
             mumumeme-model-v3-${{ runner.os }}-
 
+      # ✅ TAIL cache (labels_tail + tail model)
+      - name: Restore cache (TAIL)
+        uses: actions/cache@v4
+        with:
+          path: |
+            data/labels/strategy_raw_data_${{ env.LABEL_KEY }}.parquet
+            data/labels/strategy_raw_data_${{ env.LABEL_KEY }}.csv
+            data/labels/labels_tail_${{ env.LABEL_KEY }}.parquet
+            data/labels/labels_tail_${{ env.LABEL_KEY }}.csv
+            app/tail_model.pkl
+            app/tail_scaler.pkl
+            data/meta/train_tail_report_${{ env.LABEL_KEY }}.json
+          key: mumumeme-tail-v3-${{ runner.os }}-${{ env.LABEL_KEY }}-${{ hashFiles('scripts/build_strategy_labels.py','scripts/build_tail_labels.py','scripts/train_tail_model.py') }}
+          restore-keys: |
+            mumumeme-tail-v3-${{ runner.os }}-${{ env.LABEL_KEY }}-
+            mumumeme-tail-v3-${{ runner.os }}-
+
       - name: Prepare required files (10y only + partial rebuild)
         shell: bash
         env:
@@ -144,11 +165,13 @@ jobs:
           STOP_LEVEL: ${{ inputs.stop_level }}
           MAX_EXTEND_DAYS: ${{ inputs.max_extend_days }}
 
+          LABEL_KEY: ${{ env.LABEL_KEY }}
+
         run: |
           set -euo pipefail
 
           if [ "$REBUILD_ALL" = "true" ]; then
-            rm -rf data/raw/* data/features/* data/labels/* app/* data/signals/* || true
+            rm -rf data/raw/* data/features/* data/labels/* app/* data/signals/* data/meta/* || true
           fi
 
           # 1) universe + prices (10y만)
@@ -185,6 +208,42 @@ jobs:
             echo "[INFO] model exists -> reuse"
           fi
 
+          # ✅ 4a) strategy_raw_data_{tag} (Tail 포함)  ← 이게 없으면 tail 라벨을 만들 수가 없음
+          if [ ! -f "data/labels/strategy_raw_data_${LABEL_KEY}.parquet" ] && [ ! -f "data/labels/strategy_raw_data_${LABEL_KEY}.csv" ]; then
+            python scripts/build_strategy_labels.py \
+              --profit-target "$PROFIT_TARGET" \
+              --max-days "$MAX_DAYS" \
+              --stop-level "$STOP_LEVEL" \
+              --max-extend-days "$MAX_EXTEND_DAYS"
+          else
+            echo "[INFO] strategy_raw_data exists -> reuse"
+          fi
+
+          # ✅ 4b) labels_tail_{tag} (TailTarget)  ← train_tail_model.py가 이걸 직접 찾음
+          if [ ! -f "data/labels/labels_tail_${LABEL_KEY}.parquet" ] && [ ! -f "data/labels/labels_tail_${LABEL_KEY}.csv" ]; then
+            python scripts/build_tail_labels.py \
+              --profit-target "$PROFIT_TARGET" \
+              --max-days "$MAX_DAYS" \
+              --stop-level "$STOP_LEVEL" \
+              --max-extend-days "$MAX_EXTEND_DAYS"
+          else
+            echo "[INFO] labels_tail exists -> reuse"
+          fi
+
+          # 4c) tail_model.pkl / tail_scaler.pkl (p_tail)
+          if [ ! -f app/tail_model.pkl ] || [ ! -f app/tail_scaler.pkl ]; then
+            python scripts/train_tail_model.py \
+              --profit-target "$PROFIT_TARGET" \
+              --max-days "$MAX_DAYS" \
+              --stop-level "$STOP_LEVEL" \
+              --max-extend-days "$MAX_EXTEND_DAYS"
+          else
+            echo "[INFO] tail model exists -> reuse"
+          fi
+          
+          # 5) score features -> features_scored (p_success/p_tail attached)
+          python scripts/score_features.py --tag "$LABEL_KEY"
+
       - name: Run gate grid (predict + simulate + summarize)
         shell: bash
         env:
@@ -213,14 +272,14 @@ jobs:
           TOPK_CONFIGS: "1|1.0;2|0.7,0.3;2|0.6,0.4"
 
           # ✅ p_success 최소컷도 같이 그리드(너가 원했던 것)
-          PS_MINS: "0.00,0.50,0.60,0.70"
+          PS_MINS: ${{ inputs.ps_mins }}
 
           # ✅ 레버 상한(진입~연장 전구간)
           MAX_LEVERAGE_PCT: "1.00"
 
           OUT_DIR: "data/signals"
           EXCLUDE_TICKERS: "SPY,^VIX"
-          REQUIRE_FILES: "data/features/features_model.parquet,app/model.pkl,app/scaler.pkl"
+          REQUIRE_FILES: "data/features/features_scored.parquet,app/model.pkl,app/scaler.pkl"
 
         run: |
           set -euo pipefail
