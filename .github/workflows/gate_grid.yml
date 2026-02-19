@@ -32,6 +32,18 @@ on:
         description: "comma-separated p_success minimum cutoffs (e.g. 0.50,0.60,0.70)"
         required: true
         default: "0.00,0.50,0.60,0.70"
+      sub_ps_min:
+        description: "SUB entry filter: minimum p_success (e.g. 0.60)"
+        required: true
+        default: "0.60"
+      sub_z_max:
+        description: "SUB entry filter: maximum Z_score (e.g. 0.0)"
+        required: true
+        default: "0.0"
+      sub_dd60_max:
+        description: "SUB entry filter: maximum Drawdown_60 (e.g. -0.05)"
+        required: true
+        default: "-0.05"
       rank_metrics:
         description: "comma-separated rank metric (utility|ret_score|p_success). e.g. utility,ret_score"
         required: true
@@ -273,6 +285,10 @@ jobs:
           # ✅ p_success 최소컷도 같이 그리드(너가 원했던 것)
           PS_MINS: ${{ inputs.ps_mins }}
 
+          # ✅ SUB 추격방지 필터 (predict_gate.py -> picks에 SubOK 생성)
+          SUB_PS_MIN: ${{ inputs.sub_ps_min }}
+          SUB_Z_MAX: ${{ inputs.sub_z_max }}
+          SUB_DD60_MAX: ${{ inputs.sub_dd60_max }}
           # ✅ 레버 상한(진입~연장 전구간)
           MAX_LEVERAGE_PCT: "1.00"
 
