@@ -120,7 +120,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(
         description=(
             "Single-cycle engine with TopK (1~2), TP1 partial, trailing stop, leverage cap on ALL buys.\n"
-            "PLUS: SUB cycle (top1) funded by MAIN TP1 proceeds pool, with max_days_sub = max_days/2, trailing enabled."
+            "PLUS: SUB cycle (top1) funded by MAIN TP1 proceeds pool, with max_days_sub = max_days/2, trailing enabled.\n"
+            "SUB entry uses SubOK==1 from picks if present (anti-chasing filter)."
         )
     )
     ap.add_argument("--picks-path", required=True, type=str, help="CSV with columns Date,Ticker (TopK rows/day).")
@@ -170,12 +171,26 @@ def main() -> None:
     picks = picks.copy()
     picks["Date"] = _norm_date(picks["Date"])
     picks["Ticker"] = picks["Ticker"].astype(str).str.upper().str.strip()
+
+    # ✅ SubOK is optional; if missing, allow SUB by default.
+    if "SubOK" not in picks.columns:
+        picks["SubOK"] = 1
+    picks["SubOK"] = pd.to_numeric(picks["SubOK"], errors="coerce").fillna(0).astype(int)
+
     picks = picks.dropna(subset=["Date", "Ticker"]).sort_values(["Date"]).reset_index(drop=True)
+
+    # keep TopK per day (in case input contains more)
     picks = picks.groupby("Date", group_keys=False).head(topk).reset_index(drop=True)
 
+    # MAIN picks: existing behavior (TopK tickers)
     picks_by_date: dict[pd.Timestamp, list[str]] = {}
+    # SUB candidates: only SubOK==1, keep original order within the day's picks
+    picks_by_date_sub: dict[pd.Timestamp, list[str]] = {}
+
     for d, g in picks.groupby("Date"):
         picks_by_date[d] = g["Ticker"].tolist()
+        g2 = g[g["SubOK"] == 1]
+        picks_by_date_sub[d] = g2["Ticker"].tolist()
 
     # ---------- prices
     prices = read_table(args.prices_parq, args.prices_csv).copy()
@@ -577,14 +592,14 @@ def main() -> None:
                         tp1_cash_pool = 0.0
                         track_pool()
 
-        # ===== SUB entry (only when main trailing zone, pool>0, not used)
+        # ===== SUB entry (only when main trailing zone, pool>0, not used) + ✅ SubOK==1 candidates only
         if st.in_cycle and (not sub.in_cycle) and (not cooldown_today) and (not sub_used_in_this_main):
             all_main_tp1 = all((leg.tp1_done for leg in st.legs)) if st.legs else False
             if all_main_tp1 and tp1_cash_pool > 0:
-                picks_today = picks_by_date.get(date, [])
-                if picks_today:
+                picks_today_sub = picks_by_date_sub.get(date, [])
+                if picks_today_sub:
                     t0 = None
-                    for t in picks_today:
+                    for t in picks_today_sub:
                         if t in day_df.index and np.isfinite(day_prices_close.get(t, np.nan)):
                             t0 = t
                             break
