@@ -32,6 +32,12 @@ on:
         description: "comma-separated rank metric (utility|ret_score|p_success). e.g. utility,ret_score"
         required: true
         default: "utility,ret_score,p_success"
+
+      tp1_frac:
+        description: "tp1_frac quantiles"
+        required: true
+        default: "0.50"
+        
       lambda_tail:
         description: "utility tail penalty lambda (single float, e.g. 0.05)"
         required: true
@@ -40,7 +46,7 @@ on:
       rebuild_all:
         description: "true to rebuild prices/features/labels/models from scratch"
         required: true
-        default: "true"
+        default: "false"
 
       dedup_picks:
         description: "true=dedupe picks (skip duplicate hashes), false=run all"
@@ -73,7 +79,7 @@ jobs:
       GATE_MODES: "none,tail,utility,tail_utility"
 
       ENABLE_TRAILING: "true"
-      TP1_FRAC: "0.00,0.50,1.00"
+      TP1_FRAC: ${{ github.event.inputs.tp1_frac || '0.50' }}
       TRAIL_STOPS: "0.05,0.08,0.10,0.20"
 
       # ✅ TopK2 제거
