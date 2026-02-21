@@ -22,21 +22,13 @@ echo "[INFO] OUT_DIR=$OUT_DIR"
 : "${LAMBDA_TAIL:?}"
 : "${GATE_MODES:?}"
 : "${TRAIL_STOPS:?}"
+: "${TP1_FRAC:?}"
 : "${ENABLE_TRAILING:?}"
 : "${TOPK_CONFIGS:?}"
 : "${PS_MINS:?}"
 : "${MAX_LEVERAGE_PCT:?}"
 : "${EXCLUDE_TICKERS:?}"
 : "${REQUIRE_FILES:?}"
-
-# ✅ TP1_FRACS (multi) support:
-# - If TP1_FRACS is empty, fallback to TP1_FRAC (single)
-TP1_FRACS="${TP1_FRACS:-}"
-if [ -z "$TP1_FRACS" ]; then
-  : "${TP1_FRAC:?}"   # legacy single required when TP1_FRACS not provided
-  TP1_FRACS="$TP1_FRAC"
-fi
-echo "[INFO] TP1_FRACS=$TP1_FRACS"
 
 # ✅ dedupe on/off (default: true)
 DEDUP_PICKS="${DEDUP_PICKS:-true}"
@@ -61,8 +53,26 @@ echo "[INFO] MAX_EXTEND_DAYS=$MAX_EXTEND_DAYS (auto: H//2 when not provided)"
 # ✅ 옵션B 제거: tp1-trail-unlimited는 true만 사용
 TP1_TRAIL_UNLIMITED="true"
 
-# ✅ NEW: TP1 이후 기간제한 모드들
+# ✅ cap 모드 제어
+# - 초기 탐색: CAP_COMPARE=false, TP1_HOLD_CAP_SINGLE=none (기본)
+# - 전체 비교: CAP_COMPARE=true, TP1_HOLD_CAP_MODES=none,h2,total
+CAP_COMPARE="${CAP_COMPARE:-false}"
+CAP_COMPARE="$(echo "$CAP_COMPARE" | tr '[:upper:]' '[:lower:]' | xargs)"
+if [[ "$CAP_COMPARE" != "true" && "$CAP_COMPARE" != "false" ]]; then
+  echo "[ERROR] CAP_COMPARE must be true/false (got: $CAP_COMPARE)"
+  exit 1
+fi
+
+TP1_HOLD_CAP_SINGLE="${TP1_HOLD_CAP_SINGLE:-none}"
+TP1_HOLD_CAP_SINGLE="$(echo "$TP1_HOLD_CAP_SINGLE" | tr '[:upper:]' '[:lower:]' | xargs)"
+if [[ "$TP1_HOLD_CAP_SINGLE" != "none" && "$TP1_HOLD_CAP_SINGLE" != "h2" && "$TP1_HOLD_CAP_SINGLE" != "total" ]]; then
+  echo "[ERROR] TP1_HOLD_CAP_SINGLE must be none|h2|total (got: $TP1_HOLD_CAP_SINGLE)"
+  exit 1
+fi
+
 TP1_HOLD_CAP_MODES="${TP1_HOLD_CAP_MODES:-none,h2,total}"
+echo "[INFO] CAP_COMPARE=$CAP_COMPARE"
+echo "[INFO] TP1_HOLD_CAP_SINGLE=$TP1_HOLD_CAP_SINGLE"
 echo "[INFO] TP1_HOLD_CAP_MODES=$TP1_HOLD_CAP_MODES"
 
 # ----- helpers
@@ -129,7 +139,7 @@ PY
 
 # ----- print config
 echo "[INFO] TOPK_CONFIGS=$TOPK_CONFIGS"
-echo "[INFO] TRAIL_STOPS=$TRAIL_STOPS ENABLE_TRAILING=$ENABLE_TRAILING"
+echo "[INFO] TRAIL_STOPS=$TRAIL_STOPS TP1_FRAC=$TP1_FRAC ENABLE_TRAILING=$ENABLE_TRAILING"
 echo "[INFO] PS_MINS=$PS_MINS MAX_LEVERAGE_PCT=$MAX_LEVERAGE_PCT"
 echo "[INFO] TP1_TRAIL_UNLIMITED=$TP1_TRAIL_UNLIMITED"
 
@@ -149,6 +159,15 @@ touch "$seen_hash_file"
 
 is_hash_seen() { local h="$1"; [ -n "$h" ] && grep -q "^$h$" "$seen_hash_file"; }
 mark_hash_seen() { local h="$1"; [ -n "$h" ] && echo "$h" >> "$seen_hash_file"; }
+
+# cap modes iterator
+iter_cap_modes() {
+  if [ "$CAP_COMPARE" = "true" ]; then
+    split_csv "$TP1_HOLD_CAP_MODES"
+  else
+    echo "$TP1_HOLD_CAP_SINGLE"
+  fi
+}
 
 # ----- main loops
 while read -r mode; do
@@ -181,56 +200,50 @@ while read -r mode; do
             W="${topk_line#*|}"
 
             while read -r trail; do
-              while read -r tp1_frac; do
-                # validate tp1_frac
-                tp1_frac="$(echo "$tp1_frac" | xargs)"
-                [ -z "$tp1_frac" ] && continue
-
-                t_s="$(suffix_float "$tmax")"
-                uq_s="$(suffix_float "$uq")"
-                lam_s="$(suffix_float "$LAMBDA_TAIL")"
-                ps_s="$(suffix_float "$psmin")"
-                tr_s="$(suffix_float "$trail")"
-                tp_pct="$(python - <<PY
-f=float("$tp1_frac")
+              t_s="$(suffix_float "$tmax")"
+              uq_s="$(suffix_float "$uq")"
+              lam_s="$(suffix_float "$LAMBDA_TAIL")"
+              ps_s="$(suffix_float "$psmin")"
+              tr_s="$(suffix_float "$trail")"
+              tp_pct="$(python - <<PY
+f=float("$TP1_FRAC")
 print(int(round(f*100)))
 PY
 )"
-                tu_s="tu1"  # ✅ 옵션B 제거 -> 항상 tu1
+              tu_s="tu1"  # ✅ 옵션B 제거 -> 항상 tu1
 
-                base_suffix="${mode}_${tu_s}_t${t_s}_q${uq_s}_r${rank_by}_lam${lam_s}_ps${ps_s}_k${K}_w$(echo "$W" | tr ',' '_')_tp${tp_pct}_tr${tr_s}"
+              base_suffix="${mode}_${tu_s}_t${t_s}_q${uq_s}_r${rank_by}_lam${lam_s}_ps${ps_s}_k${K}_w$(echo "$W" | tr ',' '_')_tp${tp_pct}_tr${tr_s}"
 
-                echo "=============================="
-                echo "[RUN] mode=$mode tail_max=$tmax u_q=$uq rank_by=$rank_by lambda=$LAMBDA_TAIL ps_min=$psmin topk=$K weights=$W trail=$trail tp1_frac=$tp1_frac base_suffix=$base_suffix"
-                echo "=============================="
+              echo "=============================="
+              echo "[RUN] mode=$mode tail_max=$tmax u_q=$uq rank_by=$rank_by lambda=$LAMBDA_TAIL ps_min=$psmin topk=$K weights=$W trail=$trail base_suffix=$base_suffix"
+              echo "=============================="
 
-                # ---- PREDICT (once per base_suffix)
-                python "$PRED" \
-                  --profit-target "$PROFIT_TARGET" \
-                  --max-days "$MAX_DAYS" \
-                  --stop-level "$STOP_LEVEL" \
-                  --max-extend-days "$MAX_EXTEND_DAYS" \
-                  --mode "$mode" \
-                  --tail-threshold "$tmax" \
-                  --utility-quantile "$uq" \
-                  --rank-by "$rank_by" \
-                  --lambda-tail "$LAMBDA_TAIL" \
-                  --topk "$K" \
-                  --ps-min "$psmin" \
-                  --tag "$TAG" \
-                  --suffix "$base_suffix" \
-                  --exclude-tickers "$EXCLUDE_TICKERS" \
-                  --out-dir "$OUT_DIR" \
-                  --require-files "$REQUIRE_FILES"
+              # ---- PREDICT
+              python "$PRED" \
+                --profit-target "$PROFIT_TARGET" \
+                --max-days "$MAX_DAYS" \
+                --stop-level "$STOP_LEVEL" \
+                --max-extend-days "$MAX_EXTEND_DAYS" \
+                --mode "$mode" \
+                --tail-threshold "$tmax" \
+                --utility-quantile "$uq" \
+                --rank-by "$rank_by" \
+                --lambda-tail "$LAMBDA_TAIL" \
+                --topk "$K" \
+                --ps-min "$psmin" \
+                --tag "$TAG" \
+                --suffix "$base_suffix" \
+                --exclude-tickers "$EXCLUDE_TICKERS" \
+                --out-dir "$OUT_DIR" \
+                --require-files "$REQUIRE_FILES"
 
-                picks_path="$OUT_DIR/picks_${TAG}_gate_${base_suffix}.csv"
+              picks_path="$OUT_DIR/picks_${TAG}_gate_${base_suffix}.csv"
+              if [ ! -f "$picks_path" ]; then
+                echo "[WARN] picks missing -> skip simulate/summarize (base_suffix=$base_suffix)"
+                continue
+              fi
 
-                if [ ! -f "$picks_path" ]; then
-                  echo "[WARN] picks missing -> skip simulate/summarize (base_suffix=$base_suffix)"
-                  continue
-                fi
-
-                rows="$(python - <<PY
+              rows="$(python - <<PY
 import pandas as pd
 try:
   df=pd.read_csv("$picks_path")
@@ -239,69 +252,68 @@ except Exception:
   print(0)
 PY
 )"
-                if [ "${rows:-0}" = "0" ]; then
-                  echo "[INFO] picks rows=0 -> skip simulate/summarize (base_suffix=$base_suffix)"
-                  continue
+              if [ "${rows:-0}" = "0" ]; then
+                echo "[INFO] picks rows=0 -> skip simulate/summarize (base_suffix=$base_suffix)"
+                continue
+              fi
+
+              # ---- DEDUPE (log only)
+              if [ "$DEDUP_PICKS" = "true" ]; then
+                h="$(picks_hash "$picks_path")"
+                if is_hash_seen "$h"; then
+                  echo "[INFO] duplicate picks hash=$h -> proceed (base_suffix=$base_suffix)"
+                else
+                  mark_hash_seen "$h"
+                fi
+              fi
+
+              # ---- SIMULATE + SUMMARIZE (cap modes)
+              while read -r cap_mode; do
+                cap_mode="$(echo "$cap_mode" | tr '[:upper:]' '[:lower:]' | xargs)"
+                [ -z "$cap_mode" ] && continue
+                if [[ "$cap_mode" != "none" && "$cap_mode" != "h2" && "$cap_mode" != "total" ]]; then
+                  echo "[ERROR] invalid cap_mode=$cap_mode (must be none|h2|total)"
+                  exit 1
                 fi
 
-                # ---- DEDUPE: 기록/로그만 하고, ✅cap 비교(sim 3종)는 무조건 돌린다
-                if [ "$DEDUP_PICKS" = "true" ]; then
-                  h="$(picks_hash "$picks_path")"
-                  if is_hash_seen "$h"; then
-                    echo "[INFO] duplicate picks hash=$h -> still run cap modes for comparison (base_suffix=$base_suffix)"
-                  else
-                    mark_hash_seen "$h"
-                  fi
-                fi
+                cap_suffix="${base_suffix}_cap${cap_mode}"
 
-                # ---- SIMULATE + SUMMARIZE for each TP1 hold cap mode
-                while read -r cap_mode; do
-                  cap_mode="$(echo "$cap_mode" | tr '[:upper:]' '[:lower:]' | xargs)"
-                  [ -z "$cap_mode" ] && continue
-                  if [[ "$cap_mode" != "none" && "$cap_mode" != "h2" && "$cap_mode" != "total" ]]; then
-                    echo "[ERROR] invalid cap_mode=$cap_mode (must be none|h2|total)"
-                    exit 1
-                  fi
+                echo "------------------------------"
+                echo "[SIM] cap_mode=$cap_mode cap_suffix=$cap_suffix"
+                echo "------------------------------"
 
-                  cap_suffix="${base_suffix}_cap${cap_mode}"
+                python "$SIM" \
+                  --picks-path "$picks_path" \
+                  --profit-target "$PROFIT_TARGET" \
+                  --max-days "$MAX_DAYS" \
+                  --stop-level "$STOP_LEVEL" \
+                  --max-extend-days "$MAX_EXTEND_DAYS" \
+                  --max-leverage-pct "$MAX_LEVERAGE_PCT" \
+                  --enable-trailing "$ENABLE_TRAILING" \
+                  --tp1-frac "$TP1_FRAC" \
+                  --trail-stop "$trail" \
+                  --tp1-trail-unlimited "$TP1_TRAIL_UNLIMITED" \
+                  --tp1-hold-cap "$cap_mode" \
+                  --topk "$K" \
+                  --weights "$W" \
+                  --tag "$TAG" \
+                  --suffix "$cap_suffix" \
+                  --out-dir "$OUT_DIR"
 
-                  echo "------------------------------"
-                  echo "[SIM] cap_mode=$cap_mode cap_suffix=$cap_suffix"
-                  echo "------------------------------"
+                trades_path="$OUT_DIR/sim_engine_trades_${TAG}_gate_${cap_suffix}.parquet"
 
-                  python "$SIM" \
-                    --picks-path "$picks_path" \
-                    --profit-target "$PROFIT_TARGET" \
-                    --max-days "$MAX_DAYS" \
-                    --stop-level "$STOP_LEVEL" \
-                    --max-extend-days "$MAX_EXTEND_DAYS" \
-                    --max-leverage-pct "$MAX_LEVERAGE_PCT" \
-                    --enable-trailing "$ENABLE_TRAILING" \
-                    --tp1-frac "$tp1_frac" \
-                    --trail-stop "$trail" \
-                    --tp1-trail-unlimited "$TP1_TRAIL_UNLIMITED" \
-                    --tp1-hold-cap "$cap_mode" \
-                    --topk "$K" \
-                    --weights "$W" \
-                    --tag "$TAG" \
-                    --suffix "$cap_suffix" \
-                    --out-dir "$OUT_DIR"
+                python "$SUM" \
+                  --trades-path "$trades_path" \
+                  --tag "$TAG" \
+                  --suffix "$cap_suffix" \
+                  --profit-target "$PROFIT_TARGET" \
+                  --max-days "$MAX_DAYS" \
+                  --stop-level "$STOP_LEVEL" \
+                  --max-extend-days "$MAX_EXTEND_DAYS" \
+                  --out-dir "$OUT_DIR"
 
-                  trades_path="$OUT_DIR/sim_engine_trades_${TAG}_gate_${cap_suffix}.parquet"
+              done < <(iter_cap_modes)
 
-                  python "$SUM" \
-                    --trades-path "$trades_path" \
-                    --tag "$TAG" \
-                    --suffix "$cap_suffix" \
-                    --profit-target "$PROFIT_TARGET" \
-                    --max-days "$MAX_DAYS" \
-                    --stop-level "$STOP_LEVEL" \
-                    --max-extend-days "$MAX_EXTEND_DAYS" \
-                    --out-dir "$OUT_DIR"
-
-                done < <(split_csv "$TP1_HOLD_CAP_MODES")
-
-              done < <(split_csv "$TP1_FRACS")
             done < <(split_csv "$TRAIL_STOPS")
           done < <(split_scsv "$TOPK_CONFIGS")
         done < <(split_csv "$PS_MINS")
