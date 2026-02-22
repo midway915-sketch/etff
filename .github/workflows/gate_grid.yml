@@ -19,29 +19,29 @@ on:
       p_tail_thresholds:
         description: "comma-separated p_tail thresholds (e.g. 0.10,0.20,0.30)"
         required: true
-        default: "0.05,0.10,0.20"
+        default: "0.15,0.20,0.25,0.30"
       utility_quantiles:
         description: "comma-separated utility quantiles (e.g. 0.60,0.75,0.90)"
         required: true
-        default: "0.20,0.40"
+        default: "0.00,0.10,0.20"
       ps_mins:
         description: "comma-separated p_success minimum cutoffs (e.g. 0.50,0.60,0.70)"
         required: true
-        default: "0.00,0.05,0.10,0.50"
+        default: "0.50,0.60,0.70"
       rank_metrics:
         description: "comma-separated rank metric (utility|ret_score|p_success). e.g. utility,ret_score"
         required: true
-        default: "utility,ret_score,p_success"
+        default: "p_success"
 
       tp1_frac:
         description: "tp1_frac quantiles"
         required: true
-        default: "0.50"
+        default: "0.01,1.00"
         
       lambda_tail:
         description: "utility tail penalty lambda (single float, e.g. 0.05)"
         required: true
-        default: "0.05,0.10"
+        default: "0.03,0.05"
 
       rebuild_all:
         description: "true to rebuild prices/features/labels/models from scratch"
