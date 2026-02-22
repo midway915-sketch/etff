@@ -23,7 +23,7 @@ on:
       utility_quantiles:
         description: "comma-separated utility quantiles (e.g. 0.60,0.75,0.90)"
         required: true
-        default: "0.00,0.01,0.02"
+        default: "0.00,0.01,0.02,0.03,0.04,0.05"
       ps_mins:
         description: "comma-separated p_success minimum cutoffs (e.g. 0.50,0.60,0.70)"
         required: true
