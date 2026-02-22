@@ -36,7 +36,7 @@ on:
       tp1_frac:
         description: "tp1_frac quantiles"
         required: true
-        default: "0.01,1.00"
+        default: "1.00"
         
       lambda_tail:
         description: "utility tail penalty lambda (single float, e.g. 0.05)"
@@ -46,7 +46,7 @@ on:
       rebuild_all:
         description: "true to rebuild prices/features/labels/models from scratch"
         required: true
-        default: "true"
+        default: "false"
 
       dedup_picks:
         description: "true=dedupe picks (skip duplicate hashes), false=run all"
@@ -72,11 +72,11 @@ jobs:
       PS_MINS: ${{ github.event.inputs.ps_mins || '0.00,0.50,0.60,0.70' }}
       RANK_METRICS: ${{ github.event.inputs.rank_metrics || 'utility,ret_score' }}
       LAMBDA_TAIL: ${{ github.event.inputs.lambda_tail || '0.05' }}
-  
-      REVAL_PS_STRONG: ${{ github.event.inputs.reval_ps_strong || '0.60' }}
-      REVAL_PT_STRONG: ${{ github.event.inputs.reval_pt_strong || '0.16' }}
+      
+      REVAL_PS_STRONG: ${{ github.event.inputs.reval_ps_strong || '0.70' }}
+      REVAL_PT_STRONG: ${{ github.event.inputs.reval_pt_strong || '0.15' }}
       REVAL_PS_PASS: ${{ github.event.inputs.reval_ps_pass || '0.50' }}
-      REVAL_PT_PASS: ${{ github.event.inputs.reval_pt_pass || '0.20' }}
+      REVAL_PT_PASS: ${{ github.event.inputs.reval_pt_pass || '0.17' }}
       
       REBUILD_ALL: ${{ github.event.inputs.rebuild_all || 'false' }}
 
@@ -84,8 +84,8 @@ jobs:
       GATE_MODES: "none,tail,utility,tail_utility"
 
       ENABLE_TRAILING: "true"
-      TP1_FRAC: ${{ github.event.inputs.tp1_frac || '0.50' }}
-      TRAIL_STOPS: "0.05,0.08,0.10,0.20"
+      TP1_FRAC: ${{ github.event.inputs.tp1_frac || '1.00' }}
+      TRAIL_STOPS: "0.01"
 
       # ✅ TopK2 제거
       TOPK_CONFIGS: "1|1.0"
