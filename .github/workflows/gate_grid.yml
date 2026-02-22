@@ -72,11 +72,11 @@ jobs:
       PS_MINS: ${{ github.event.inputs.ps_mins || '0.00,0.50,0.60,0.70' }}
       RANK_METRICS: ${{ github.event.inputs.rank_metrics || 'utility,ret_score' }}
       LAMBDA_TAIL: ${{ github.event.inputs.lambda_tail || '0.05' }}
-      
-      REVAL_PS_STRONG: ${{ github.event.inputs.reval_ps_strong || '0.70' }}
-      REVAL_PT_STRONG: ${{ github.event.inputs.reval_pt_strong || '0.15' }}
+  
+      REVAL_PS_STRONG: ${{ github.event.inputs.reval_ps_strong || '0.60' }}
+      REVAL_PT_STRONG: ${{ github.event.inputs.reval_pt_strong || '0.16' }}
       REVAL_PS_PASS: ${{ github.event.inputs.reval_ps_pass || '0.50' }}
-      REVAL_PT_PASS: ${{ github.event.inputs.reval_pt_pass || '0.17' }}
+      REVAL_PT_PASS: ${{ github.event.inputs.reval_pt_pass || '0.20' }}
       
       REBUILD_ALL: ${{ github.event.inputs.rebuild_all || 'false' }}
 
