@@ -46,7 +46,7 @@ on:
       rebuild_all:
         description: "true to rebuild prices/features/labels/models from scratch"
         required: true
-        default: "false"
+        default: "true"
 
       dedup_picks:
         description: "true=dedupe picks (skip duplicate hashes), false=run all"
@@ -76,7 +76,7 @@ jobs:
       REVAL_PS_STRONG: ${{ github.event.inputs.reval_ps_strong || '0.70' }}
       REVAL_PT_STRONG: ${{ github.event.inputs.reval_pt_strong || '0.15' }}
       REVAL_PS_PASS: ${{ github.event.inputs.reval_ps_pass || '0.50' }}
-      REVAL_PT_PASS: ${{ github.event.inputs.reval_pt_pass || '0.17' }}
+      REVAL_PT_PASS: ${{ github.event.inputs.reval_pt_pass || '0.20' }}
       
       REBUILD_ALL: ${{ github.event.inputs.rebuild_all || 'false' }}
 
