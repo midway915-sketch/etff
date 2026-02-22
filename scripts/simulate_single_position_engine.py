@@ -82,6 +82,9 @@ class CycleState:
     grace_days_left: int = 0
     recovery_threshold: float = np.nan
     reval_strength: str = ""
+    # ✅ NEW: store ps/pt at re-eval time (so PASS cases can print ps/pt in Reason later)
+    reval_ps: float = np.nan
+    reval_pt: float = np.nan
 
     # risk / stats
     max_leverage_pct: float = 0.0
@@ -432,6 +435,8 @@ def main() -> None:
         st.grace_days_left = 0
         st.recovery_threshold = np.nan
         st.reval_strength = ""
+        st.reval_ps = np.nan
+        st.reval_pt = np.nan
 
         st.max_leverage_pct = 0.0
         st.legs = []
@@ -534,6 +539,8 @@ def main() -> None:
             if st.pending_reval:
                 strength, ps_m, pt_m = reval_strength_for_day(date)
                 st.reval_strength = strength
+                st.reval_ps = float(ps_m)
+                st.reval_pt = float(pt_m)
 
                 if strength == "FAIL":
                     close_cycle(date, day_prices_close, reason=f"REVAL_FAIL(ps={ps_m:.3f},pt={pt_m:.3f})")
@@ -642,10 +649,18 @@ def main() -> None:
                                 break
 
                     if hit:
-                        close_cycle(date, day_prices_close, reason="GRACE_RECOVERY_EXIT")
+                        close_cycle(
+                            date,
+                            day_prices_close,
+                            reason=f"GRACE_RECOVERY_EXIT(str={st.reval_strength},ps={st.reval_ps:.3f},pt={st.reval_pt:.3f})",
+                        )
                     else:
                         if st.in_cycle and st.grace_days_left <= 0:
-                            close_cycle(date, day_prices_close, reason="GRACE_END_EXIT")
+                            close_cycle(
+                                date,
+                                day_prices_close,
+                                reason=f"GRACE_END_EXIT(str={st.reval_strength},ps={st.reval_ps:.3f},pt={st.reval_pt:.3f})",
+                            )
 
                 if st.in_cycle:
                     st.update_dd(day_prices_close)
@@ -755,6 +770,8 @@ def main() -> None:
                         st.grace_days_left = 0
                         st.recovery_threshold = np.nan
                         st.reval_strength = ""
+                        st.reval_ps = np.nan
+                        st.reval_pt = np.nan
 
                         st.max_leverage_pct = 0.0
                         st.legs = legs

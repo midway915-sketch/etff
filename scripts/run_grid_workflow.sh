@@ -30,6 +30,13 @@ echo "[INFO] OUT_DIR=$OUT_DIR"
 : "${EXCLUDE_TICKERS:?}"
 : "${REQUIRE_FILES:?}"
 
+# ✅ NEW: re-eval thresholds (engine args)
+REVAL_PS_STRONG="${REVAL_PS_STRONG:-0.70}"
+REVAL_PT_STRONG="${REVAL_PT_STRONG:-0.20}"
+REVAL_PS_PASS="${REVAL_PS_PASS:-0.60}"
+REVAL_PT_PASS="${REVAL_PT_PASS:-0.35}"
+echo "[INFO] REVAL_PS_STRONG=$REVAL_PS_STRONG REVAL_PT_STRONG=$REVAL_PT_STRONG REVAL_PS_PASS=$REVAL_PS_PASS REVAL_PT_PASS=$REVAL_PT_PASS"
+
 # ✅ dedupe on/off (default: true)
 DEDUP_PICKS="${DEDUP_PICKS:-true}"
 DEDUP_PICKS="$(echo "$DEDUP_PICKS" | tr '[:upper:]' '[:lower:]' | xargs)"
@@ -294,6 +301,10 @@ PY
                   --trail-stop "$trail" \
                   --tp1-trail-unlimited "$TP1_TRAIL_UNLIMITED" \
                   --tp1-hold-cap "$cap_mode" \
+                  --reval-ps-strong "$REVAL_PS_STRONG" \
+                  --reval-pt-strong "$REVAL_PT_STRONG" \
+                  --reval-ps-pass "$REVAL_PS_PASS" \
+                  --reval-pt-pass "$REVAL_PT_PASS" \
                   --topk "$K" \
                   --weights "$W" \
                   --tag "$TAG" \
