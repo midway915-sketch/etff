@@ -19,15 +19,15 @@ on:
       p_tail_thresholds:
         description: "comma-separated p_tail thresholds (e.g. 0.10,0.20,0.30)"
         required: true
-        default: "0.15,0.20,0.25,0.30"
+        default: "0.20,0.22,0.24"
       utility_quantiles:
         description: "comma-separated utility quantiles (e.g. 0.60,0.75,0.90)"
         required: true
-        default: "0.00,0.10,0.20"
+        default: "0.00,0.01,0.02"
       ps_mins:
         description: "comma-separated p_success minimum cutoffs (e.g. 0.50,0.60,0.70)"
         required: true
-        default: "0.50,0.60,0.70"
+        default: "0.40,0.50,0.60"
       rank_metrics:
         description: "comma-separated rank metric (utility|ret_score|p_success). e.g. utility,ret_score"
         required: true
@@ -41,7 +41,7 @@ on:
       lambda_tail:
         description: "utility tail penalty lambda (single float, e.g. 0.05)"
         required: true
-        default: "0.03,0.05"
+        default: "0.01"
 
       rebuild_all:
         description: "true to rebuild prices/features/labels/models from scratch"
@@ -78,10 +78,10 @@ jobs:
       REVAL_PS_PASS: ${{ github.event.inputs.reval_ps_pass || '0.50' }}
       REVAL_PT_PASS: ${{ github.event.inputs.reval_pt_pass || '0.20' }}
       
-      REBUILD_ALL: ${{ github.event.inputs.rebuild_all || 'false' }}
+      REBUILD_ALL: ${{ github.event.inputs.rebuild_all || 'true' }}
 
       PRICE_START: "2015-02-21"
-      GATE_MODES: "none,tail,utility,tail_utility"
+      GATE_MODES: "tail,tail_utility"
 
       ENABLE_TRAILING: "true"
       TP1_FRAC: ${{ github.event.inputs.tp1_frac || '1.00' }}
