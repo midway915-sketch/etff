@@ -19,29 +19,29 @@ on:
       p_tail_thresholds:
         description: "comma-separated p_tail thresholds (e.g. 0.10,0.20,0.30)"
         required: true
-        default: "0.20,0.22,0.24"
+        default: "0.10,0.20,0.30"
       utility_quantiles:
         description: "comma-separated utility quantiles (e.g. 0.60,0.75,0.90)"
         required: true
-        default: "0.00,0.01,0.02,0.03,0.04,0.05"
+        default: "0.01,0.20,0.50"
       ps_mins:
         description: "comma-separated p_success minimum cutoffs (e.g. 0.50,0.60,0.70)"
         required: true
-        default: "0.40,0.50,0.60"
+        default: "0.00,0.50,0.70"
       rank_metrics:
         description: "comma-separated rank metric (utility|ret_score|p_success). e.g. utility,ret_score"
         required: true
-        default: "p_success"
+        default: "utility,ret_score,p_success"
 
       tp1_frac:
         description: "tp1_frac quantiles"
         required: true
-        default: "1.00"
+        default: "0.50,1.00"
         
       lambda_tail:
         description: "utility tail penalty lambda (single float, e.g. 0.05)"
         required: true
-        default: "0.01"
+        default: "0.20"
 
       rebuild_all:
         description: "true to rebuild prices/features/labels/models from scratch"
@@ -80,17 +80,19 @@ jobs:
       
       REBUILD_ALL: ${{ github.event.inputs.rebuild_all || 'true' }}
 
-      PRICE_START: "2015-02-21"
-      GATE_MODES: "tail,tail_utility"
+      PRICE_START: "2008-01-01"
+      PRICE_END: "2026-01-01"
+      MAX_YEARS: "21"   # 예: 15년 + 1년 워밍업 느낌 (원하는 값으로)
+
+      GATE_MODES: "none,tail,utility,tail_utility"
 
       ENABLE_TRAILING: "true"
       TP1_FRAC: ${{ github.event.inputs.tp1_frac || '1.00' }}
-      TRAIL_STOPS: "0.01"
+      TRAIL_STOPS: "0.10"
 
       # ✅ TopK2 제거
       TOPK_CONFIGS: "1|1.0"
       MAX_LEVERAGE_PCT: "1.00"
-
       CAP_COMPARE: "false"
       TP1_HOLD_CAP_SINGLE: "none"
 
@@ -160,8 +162,10 @@ jobs:
             data/raw/prices.parquet
             data/raw/prices.csv
             data/raw/prices_meta.json
-          key: mumumeme-prices-v3-${{ runner.os }}-${{ hashFiles('data/universe.csv','scripts/universe.py','scripts/fetch_prices.py') }}
+          key: mumumeme-prices-v3-${{ runner.os }}-ys${{ env.MAX_YEARS }}-ps${{ env.PRICE_START }}-${{ hashFiles('data/universe.csv','scripts/universe.py','scripts/fetch_prices.py') }}
+          
           restore-keys: |
+            mumumeme-prices-v3-${{ runner.os }}-ys${{ env.MAX_YEARS }}-ps${{ env.PRICE_START }}-
             mumumeme-prices-v3-${{ runner.os }}-
 
       - name: Restore cache (FEATURES_MODEL)
@@ -234,9 +238,9 @@ jobs:
 
           python scripts/universe.py
           if [ ! -f data/raw/prices.parquet ] && [ ! -f data/raw/prices.csv ]; then
-            python scripts/fetch_prices.py --include-extra --reset --force-full --start "${PRICE_START}"
+            python scripts/fetch_prices.py --include-extra --reset --force-full --start "${PRICE_START}" --end "${PRICE_END}" --max-years 20
           else
-            python scripts/fetch_prices.py --include-extra --lookback-days 10 --start "${PRICE_START}"
+            python scripts/fetch_prices.py --include-extra --lookback-days 10 --start "${PRICE_START}" --end "${PRICE_END}"
           fi
 
           if [ ! -f data/features/features_model.parquet ] && [ ! -f data/features/features_model.csv ]; then
