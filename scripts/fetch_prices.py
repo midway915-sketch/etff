@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os  # ✅ ADDED
 import time
 from pathlib import Path
 from datetime import datetime, timezone
@@ -21,6 +22,9 @@ OUT_CSV_FALLBACK = RAW_DIR / "prices.csv"
 META_JSON = RAW_DIR / "prices_meta.json"
 
 DEFAULT_EXTRA_TICKERS = ["SPY", "^VIX"]
+
+# ✅ ADDED: allow workflow env to control max-years without changing CLI calls
+DEFAULT_MAX_YEARS = int(os.getenv("MAX_YEARS", "11"))
 
 
 def now_utc_iso() -> str:
@@ -229,7 +233,8 @@ def main() -> None:
     parser.add_argument("--retries", type=int, default=3)
     parser.add_argument("--sleep-base", type=float, default=1.2)
     parser.add_argument("--include-extra", action="store_true", help="Include SPY and ^VIX for market features.")
-    parser.add_argument("--max-years", type=int, default=11, help="Limit raw price history to recent N years (default 11 = 10y + warmup).")
+    # ✅ CHANGED: default now comes from env MAX_YEARS (fallback 11)
+    parser.add_argument("--max-years", type=int, default=DEFAULT_MAX_YEARS, help="Limit raw price history to recent N years (default from env MAX_YEARS or 11).")
     args = parser.parse_args()
 
     tickers = read_universe(UNIVERSE_CSV)
@@ -329,9 +334,18 @@ def main() -> None:
     META_JSON.write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
     print(f"[DONE] saved={saved_to} rows={len(combined)} range={meta['min_date']}..{meta['max_date']}")
-    if failed and len(failed) >= max(3, len(tickers) // 2):
-        raise RuntimeError(f"Too many ticker download failures: {len(failed)}/{len(tickers)}")
 
-
+    # NOTE:
+    # In truncated backtests (e.g., 2008~2014), many tickers may not have existed yet,
+    # and yfinance returns "Empty data". That's not a fatal error as long as we got
+    # enough tickers to proceed.
+    ok = len(downloads)
+    total = len(tickers)
+    
+    # Fail only when "too few" tickers succeeded (hard floor).
+    # (Before: failed >= half -> abort)
+    min_ok = max(3, total // 4)  # require at least 25% (and at least 3 tickers)
+    if ok < min_ok:
+        raise RuntimeError(f"Too few tickers downloaded: ok={ok}/{total}, failed={len(failed)}")
 if __name__ == "__main__":
     main()
