@@ -46,7 +46,7 @@ on:
       rebuild_all:
         description: "true to rebuild prices/features/labels/models from scratch"
         required: true
-        default: "false"
+        default: "true"
 
       dedup_picks:
         description: "true=dedupe picks (skip duplicate hashes), false=run all"
