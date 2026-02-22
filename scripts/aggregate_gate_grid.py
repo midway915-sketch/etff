@@ -125,6 +125,48 @@ def _parse_cap_from_suffix(suffix: str) -> tuple[str, str]:
     return (m.group(1), m.group(2))
 
 
+# ✅ NEW: yearly returns (warmup 이후 구간 기준)
+def _calc_yearly_returns(cur2: pd.DataFrame) -> dict:
+    """
+    cur2: cleaned curve filtered to Date >= warmup_end (must have Date, Equity)
+    Returns dict: {"YearReturn_YYYY": float, ...}
+      - 연도별 수익률 = (해당연도 마지막 Equity / 직전 기준 Equity) - 1
+      - 첫 해의 기준 Equity는 cur2의 첫 관측 Equity
+      - 마지막 해는 부분연도(현재까지) 포함
+    """
+    if cur2 is None or cur2.empty:
+        return {}
+
+    c = cur2[["Date", "Equity"]].copy()
+    c["Date"] = _safe_to_dt(c["Date"])
+    c["Equity"] = pd.to_numeric(c["Equity"], errors="coerce")
+    c = c.dropna(subset=["Date", "Equity"]).sort_values("Date").reset_index(drop=True)
+    if c.empty:
+        return {}
+
+    # 연도별 마지막 equity
+    c["Year"] = c["Date"].dt.year.astype(int)
+    year_end = c.groupby("Year", as_index=False).tail(1).sort_values("Year").reset_index(drop=True)
+
+    out: dict[str, float] = {}
+    base = float(c["Equity"].iloc[0])  # 첫 해 기준: warmup 이후 첫 관측 equity
+    if not np.isfinite(base) or base <= 0:
+        return {}
+
+    prev = base
+    for _, r in year_end.iterrows():
+        y = int(r["Year"])
+        eq_end = float(r["Equity"])
+        if np.isfinite(eq_end) and eq_end > 0 and np.isfinite(prev) and prev > 0:
+            out[f"YearReturn_{y}"] = float(eq_end / prev - 1.0)
+            prev = eq_end
+        else:
+            out[f"YearReturn_{y}"] = float("nan")
+            # prev는 유지
+
+    return out
+
+
 def enrich_one_summary(row: pd.Series, signals_dir: Path, prices: pd.DataFrame) -> dict:
     tag = str(row.get("TAG", "run"))
     suffix = str(row.get("GateSuffix", ""))
@@ -239,6 +281,10 @@ def enrich_one_summary(row: pd.Series, signals_dir: Path, prices: pd.DataFrame) 
         "QQQ_CAGR_SamePeriod": qqq_cagr,
         "ExcessCAGR_AfterWarmup": excess_cagr,
     })
+
+    # ✅ NEW: YearReturn_YYYY columns
+    out.update(_calc_yearly_returns(cur2))
+
     return out
 
 
